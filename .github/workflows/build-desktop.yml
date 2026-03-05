@@ -9,7 +9,7 @@ on:
         type: boolean
         default: true
       release_tag:
-        description: "Release tag (for example: v1.0.0). Required when create_release is enabled."
+        description: "Optional manual release tag override (for example: 1.2 or 1.3.0)"
         required: false
         type: string
       release_name:
@@ -226,23 +226,83 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Validate release inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${{ inputs.release_tag }}" ]]; then
-            echo "release_tag is required when create_release=true."
-            exit 1
-          fi
+      - name: Checkout (for tag history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Resolve release metadata
         shell: bash
         run: |
           set -euo pipefail
+          git fetch --tags --force
+
+          tag_exists() {
+            local t="$1"
+            git tag -l | sed -E 's/^v//' | grep -Fxq "$t"
+          }
+
+          # Manual override, if provided.
+          manual_tag="${{ inputs.release_tag }}"
+          if [[ -n "$manual_tag" ]]; then
+            release_tag="$manual_tag"
+          else
+            # Normalize existing tag space by stripping optional leading "v".
+            stable_versions="$(git tag -l | sed -E 's/^v//' | grep -E '^[0-9]+\.[0-9]+$' | sort -u || true)"
+            latest_stable="$(printf "%s\n" "$stable_versions" | sort -V | tail -n 1)"
+
+            if [[ "${{ inputs.prerelease }}" == "true" ]]; then
+              # Pre-release sequence:
+              # - If latest stable is X.Y, pre-release line is X.(Y+1).Z
+              # - If no stable exists yet, start at 1.0.0
+              if [[ -n "$latest_stable" ]]; then
+                IFS='.' read -r stable_major stable_minor <<< "$latest_stable"
+                pre_major="$stable_major"
+                pre_minor="$((stable_minor + 1))"
+              else
+                pre_major=1
+                pre_minor=0
+              fi
+
+              pre_prefix="${pre_major}.${pre_minor}"
+              pre_versions="$(git tag -l | sed -E 's/^v//' | grep -E "^${pre_major}\\.${pre_minor}\\.[0-9]+$" | sort -u || true)"
+              latest_pre_patch="$(printf "%s\n" "$pre_versions" | sed -E 's/^.*\.([0-9]+)$/\1/' | sort -n | tail -n 1)"
+              if [[ -n "$latest_pre_patch" ]]; then
+                next_pre_patch="$((latest_pre_patch + 1))"
+              else
+                next_pre_patch=0
+              fi
+              release_tag="${pre_prefix}.${next_pre_patch}"
+
+              # Guard against canonical/legacy duplicate tags (e.g. v1.3.0 vs 1.3.0).
+              while tag_exists "$release_tag"; do
+                next_pre_patch="$((next_pre_patch + 1))"
+                release_tag="${pre_prefix}.${next_pre_patch}"
+              done
+            else
+              # Stable release sequence: 1.0, 1.1, 1.2, ...
+              if [[ -n "$latest_stable" ]]; then
+                IFS='.' read -r stable_major stable_minor <<< "$latest_stable"
+                next_minor="$((stable_minor + 1))"
+                release_tag="${stable_major}.${next_minor}"
+              else
+                release_tag="1.0"
+              fi
+
+              # Guard against canonical/legacy duplicate tags (e.g. v1.0 vs 1.0).
+              while tag_exists "$release_tag"; do
+                IFS='.' read -r stable_major stable_minor <<< "$release_tag"
+                release_tag="${stable_major}.$((stable_minor + 1))"
+              done
+            fi
+          fi
+
+          echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
+
           if [[ -n "${{ inputs.release_name }}" ]]; then
             echo "RELEASE_NAME=${{ inputs.release_name }}" >> "$GITHUB_ENV"
           else
-            echo "RELEASE_NAME=PDF Markdown Studio ${{ inputs.release_tag }}" >> "$GITHUB_ENV"
+            echo "RELEASE_NAME=PDF Markdown Studio ${release_tag}" >> "$GITHUB_ENV"
           fi
 
       - name: Download Windows .zip artifact
@@ -269,7 +329,7 @@ jobs:
           set -euo pipefail
           ls -lah release-assets/windows release-assets/macos release-assets/linux
 
-          TAG="${{ inputs.release_tag }}"
+          TAG="${RELEASE_TAG}"
           REPO="${GITHUB_REPOSITORY}"
 
           WIN_FILE="pdf-markdown-studio-windows-x64.zip"
@@ -309,7 +369,7 @@ jobs:
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag }}
+          tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
           name: ${{ env.RELEASE_NAME }}
           prerelease: ${{ inputs.prerelease }}
