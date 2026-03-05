@@ -91,16 +91,52 @@ Default vision model folder:
 - GPU mode: select one GPU in settings.
 - The app sends one selected GPU for VLM execution paths through Engine runtime.
 
-## Troubleshooting
+# Troubleshooting
+## Unsigned Build Notice
 
-If conversion fails or setup is incomplete:
+This app is an open-source hobby development effort by the repository owner.
+We do not currently have funding for full paid code-signing and notarization
+pipelines across all platforms/releases.
+
+Because of that, operating-system protections or hardened security environments
+(for example Windows SmartScreen, enterprise endpoint controls, or macOS
+Gatekeeper policies) may block unsigned binaries.
+
+If your environment blocks unsigned binaries, the recommended path is:
+- build this desktop app from source on the target device,
+- build Openresearchtools-Engine from source on the same target device,
+- and use those locally-built artifacts in your deployment.
+
+### Windows (when blocked)
+
+- If SmartScreen shows "Windows protected your PC", use `More info` ->
+  `Run anyway` only if your policy allows it.
+- In the app, go to `Settings -> Runtime Setup` and run:
+  - `Download/Repair runtime`
+  - `Unblock unsigned runtime`
+  - `Recheck`
+- The Windows unblock script clears Mark-of-the-Web flags in the selected
+  runtime directory by running `Unblock-File` recursively on runtime files.
+
+### macOS (when blocked)
+
+- Try `Right click -> Open` on first launch.
+- If blocked by Gatekeeper, use `System Settings -> Privacy & Security ->
+  Open Anyway` when available and policy permits.
+- In the app, after runtime install/repair, click `Unblock unsigned runtime`
+  then `Recheck`.
+- The macOS unblock script removes quarantine attributes recursively
+  (`xattr -dr com.apple.quarantine`) and restores executable bits for runtime
+  binaries/scripts where needed (`chmod +x` on relevant files).
+
+##If conversion fails or setup is incomplete:
 
 1. Open `Settings`.
 2. Use runtime health/check and download/repair actions.
 3. Confirm model and MMProj paths exist.
 4. Check `Jobs and logs` for the exact error.
 
-If adding many files feels slow:
+##If adding many files feels slow:
 
 - Wait for background imports to finish before converting.
 - Large PDFs can take time to rasterize and preview.
@@ -109,8 +145,12 @@ If adding many files feels slow:
 
 This app uses OpenResearchTools Engine runtime components for PDF and VLM execution `https://github.com/openresearchtools/engine`. For this app's active feature set, key upstream technologies include:
 
-- `egui / eframe` (desktop GUI framework)
-- `llama.cpp`
+- [`Openresearchtools-Engine`](https://github.com/openresearchtools/engine):
+  embeddable runtime used by this app (`llama-server-bridge`, runtime orchestration, and model/device execution path).
+- [`egui`](https://github.com/emilk/egui) / [`eframe`](https://github.com/emilk/egui/tree/master/crates/eframe):
+  native immediate-mode GUI framework used to build this desktop application UI.
+- [`llama.cpp`](https://github.com/ggml-org/llama.cpp) and [`ggml`](https://github.com/ggml-org/ggml):
+  core inference runtime and device/offload mechanics used through Openresearchtools-Engine.
 - `PDFium`
 - `Qwen / Qwen3-VL`
 
