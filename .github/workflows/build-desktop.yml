@@ -1,0 +1,275 @@
+name: Build Desktop App
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform_key }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform_key: windows-x64
+            binary_name: pdf_markdown_studio.exe
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            platform_key: macos-arm64
+            binary_name: pdf_markdown_studio
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform_key: ubuntu-x64
+            binary_name: pdf_markdown_studio
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libx11-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libgtk-3-dev \
+            libasound2-dev \
+            libudev-dev
+
+      - name: Build release
+        shell: pwsh
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Validate runtime manifest mapping for platform
+        shell: pwsh
+        run: >
+          python scripts/ci_fetch_engine_runtime.py
+          --manifest runtime-manifests/engine-manifest.json
+          --platform ${{ matrix.platform_key }}
+          --check-only
+          --selection-out dist/runtime-selection-${{ matrix.platform_key }}.json
+
+      - name: Assemble bundle
+        shell: pwsh
+        run: |
+          $repoRoot = Resolve-Path .
+          $bundleRoot = Join-Path $repoRoot "dist/bundle-${{ matrix.platform_key }}"
+          $binaryPath = Join-Path $repoRoot "target/${{ matrix.target }}/release/${{ matrix.binary_name }}"
+
+          if (!(Test-Path $binaryPath)) {
+            throw "Built binary not found: $binaryPath"
+          }
+
+          if (Test-Path $bundleRoot) {
+            Remove-Item -Recurse -Force $bundleRoot
+          }
+          New-Item -ItemType Directory -Path $bundleRoot | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $bundleRoot "runtime-manifests") | Out-Null
+
+          Copy-Item $binaryPath (Join-Path $bundleRoot "${{ matrix.binary_name }}") -Force
+          Copy-Item "runtime-manifests/engine-manifest.json" (Join-Path $bundleRoot "runtime-manifests/engine-manifest.json") -Force
+          Copy-Item "runtime-manifests/engine-manifest-sources.json" (Join-Path $bundleRoot "runtime-manifests/engine-manifest-sources.json") -Force
+          Copy-Item "LICENSE" (Join-Path $bundleRoot "LICENSE") -Force
+          Copy-Item "README.md" (Join-Path $bundleRoot "README.md") -Force
+          Copy-Item -Recurse -Force "licenses" (Join-Path $bundleRoot "licenses")
+          Copy-Item "dist/runtime-selection-${{ matrix.platform_key }}.json" (Join-Path $bundleRoot "runtime-selection.json") -Force
+
+          $buildInfo = @(
+            "app=pdf_markdown_studio"
+            "target=${{ matrix.target }}"
+            "platform_key=${{ matrix.platform_key }}"
+            "runtime_manifest=runtime-manifests/engine-manifest.json"
+          )
+          $buildInfo | Set-Content -Path (Join-Path $bundleRoot "BUILD_INFO.txt") -Encoding utf8
+
+      - name: Build Ubuntu .deb package
+        if: matrix.platform_key == 'ubuntu-x64'
+        shell: bash
+        run: |
+          python3 scripts/build_linux_deb.py \
+            --repo-root . \
+            --binary "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" \
+            --output-dir dist
+
+      - name: Normalize Ubuntu .deb filename
+        if: matrix.platform_key == 'ubuntu-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb_path="$(ls dist/*.deb | head -n 1)"
+          cp "$deb_path" "dist/pdf-markdown-studio-linux-amd64.deb"
+
+      - name: Build macOS .app and .dmg package
+        if: matrix.platform_key == 'macos-arm64'
+        shell: bash
+        run: |
+          icon_args=()
+          if [[ -f "logo/macos/AppIcon.icns" ]]; then
+            icon_args=(--icon "logo/macos/AppIcon.icns")
+          fi
+          bash scripts/build_macos_dmg.sh \
+            --repo-root . \
+            --target "${{ matrix.target }}" \
+            --binary "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" \
+            --output-dir dist \
+            --skip-build \
+            "${icon_args[@]}"
+
+      - name: Normalize macOS .dmg filename
+        if: matrix.platform_key == 'macos-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg_path="$(ls dist/*.dmg | head -n 1)"
+          cp "$dmg_path" "dist/pdf-markdown-studio-macos-arm64.dmg"
+
+      - name: Package Windows .zip bundle
+        if: matrix.platform_key == 'windows-x64'
+        shell: pwsh
+        run: |
+          $zipPath = "dist/pdf-markdown-studio-windows-x64.zip"
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+          Compress-Archive -Path "dist/bundle-windows-x64/*" -DestinationPath $zipPath
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-markdown-studio-${{ matrix.platform_key }}
+          path: dist/bundle-${{ matrix.platform_key }}
+          if-no-files-found: error
+
+      - name: Upload Windows .zip artifact
+        if: matrix.platform_key == 'windows-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-markdown-studio-windows-x64-zip
+          path: dist/pdf-markdown-studio-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Upload Ubuntu .deb artifact
+        if: matrix.platform_key == 'ubuntu-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-markdown-studio-ubuntu-x64-deb
+          path: dist/pdf-markdown-studio-linux-amd64.deb
+          if-no-files-found: error
+
+      - name: Upload macOS app/dmg artifact
+        if: matrix.platform_key == 'macos-arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-markdown-studio-macos-arm64-dmg
+          path: |
+            dist/PDF Markdown Studio.app
+            dist/*.dmg
+          if-no-files-found: error
+
+      - name: Upload macOS .dmg artifact
+        if: matrix.platform_key == 'macos-arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-markdown-studio-macos-arm64-dmg-only
+          path: dist/pdf-markdown-studio-macos-arm64.dmg
+          if-no-files-found: error
+
+  publish_release:
+    name: Publish Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows .zip artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pdf-markdown-studio-windows-x64-zip
+          path: release-assets/windows
+
+      - name: Download macOS .dmg artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pdf-markdown-studio-macos-arm64-dmg-only
+          path: release-assets/macos
+
+      - name: Download Ubuntu .deb artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pdf-markdown-studio-ubuntu-x64-deb
+          path: release-assets/linux
+
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lah release-assets/windows release-assets/macos release-assets/linux
+
+          TAG="${GITHUB_REF_NAME}"
+          REPO="${GITHUB_REPOSITORY}"
+
+          WIN_FILE="pdf-markdown-studio-windows-x64.zip"
+          MAC_FILE="pdf-markdown-studio-macos-arm64.dmg"
+          LINUX_FILE="pdf-markdown-studio-linux-amd64.deb"
+
+          WIN_URL="https://github.com/${REPO}/releases/download/${TAG}/${WIN_FILE}"
+          MAC_URL="https://github.com/${REPO}/releases/download/${TAG}/${MAC_FILE}"
+          LINUX_URL="https://github.com/${REPO}/releases/download/${TAG}/${LINUX_FILE}"
+
+          cat > release-notes.md <<EOF
+          ## Downloads
+
+          - Windows x64: [${WIN_FILE}](${WIN_URL})
+          - macOS arm64: [${MAC_FILE}](${MAC_URL})
+          - Ubuntu x64: [${LINUX_FILE}](${LINUX_URL})
+
+          ## Quick Install (Ubuntu)
+
+          \`\`\`bash
+          curl -L "${LINUX_URL}" -o /tmp/${LINUX_FILE} && sudo apt install -y /tmp/${LINUX_FILE}
+          \`\`\`
+
+          ## Quick Download Commands
+
+          Windows (PowerShell):
+          \`\`\`powershell
+          Invoke-WebRequest -Uri "${WIN_URL}" -OutFile "${WIN_FILE}"
+          \`\`\`
+
+          macOS:
+          \`\`\`bash
+          curl -L "${MAC_URL}" -o "${MAC_FILE}"
+          \`\`\`
+          EOF
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: PDF Markdown Studio ${{ github.ref_name }}
+          body_path: release-notes.md
+          generate_release_notes: false
+          files: |
+            release-assets/windows/pdf-markdown-studio-windows-x64.zip
+            release-assets/macos/pdf-markdown-studio-macos-arm64.dmg
+            release-assets/linux/pdf-markdown-studio-linux-amd64.deb

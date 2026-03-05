@@ -1,0 +1,33 @@
+# Rust build artifacts
+/target/
+/target-build-check/
+/dist/
+
+# Local runtime/download artifacts (if created in repo root)
+/runtime/
+/models/
+/downloads/
+
+# Local bundled binaries (not source)
+/pdfium/
+/pdfium.dll
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Python caches/virtualenvs (scripts tooling only)
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

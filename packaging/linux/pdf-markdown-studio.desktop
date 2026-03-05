@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=PDF Markdown Studio
+Comment=Convert PDFs and images to markdown
+Exec=pdf-markdown-studio
+Icon=pdf-markdown-studio
+StartupWMClass=pdf-markdown-studio
+Terminal=false
+Categories=Office;Utility;
+Keywords=PDF;Markdown;VLM;OCR;
+StartupNotify=true
