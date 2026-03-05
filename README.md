@@ -151,10 +151,14 @@ This app uses OpenResearchTools Engine runtime components for PDF and VLM execut
   native immediate-mode GUI framework used to build this desktop application UI.
 - [`llama.cpp`](https://github.com/ggml-org/llama.cpp) and [`ggml`](https://github.com/ggml-org/ggml):
   core inference runtime and device/offload mechanics used through Openresearchtools-Engine.
-- `PDFium`
-- `Qwen / Qwen3-VL`
+- [`Docling`](https://github.com/docling-project/docling):
+  reference logic for VLM document-conversion behavior used by Engine `pdfvlm`, including page-wise rendering/scaling heuristics (`scale`, `oversample`) and Catmull-Rom style downscale before inference.
+- [`PDFium`](https://pdfium.googlesource.com/pdfium/) and [`pdfium-render`](https://github.com/ajrcarey/pdfium-render):
+  PDF rasterization/page access primitives used by the app's native PDF rendering and by Engine PDF conversion paths.
+- [`Qwen`](https://huggingface.co/Qwen) / [`Qwen3-VL GGUF`](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF):
+  VLM model family used for image and PDF-VLM markdown conversion when configured by the user.
 
-This project is independent and is **not affiliated with, sponsored by, or endorsed by** `egui`, `llama.cpp`, `PDFium`, `Qwen`, or other upstream projects/vendors.
+This project is independent and is **not affiliated with, sponsored by, or endorsed by** `egui`, `llama.cpp`, `Docling`, `PDFium`, `Qwen`, or other upstream projects/vendors.
 
 
 
