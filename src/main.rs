@@ -87,6 +87,9 @@ const PDF_ZOOM_STEP: f32 = 0.10;
 const PAGE_ACTIVE_VISIBILITY_THRESHOLD: f32 = 0.80;
 const MAX_BACKGROUND_EVENTS_PER_FRAME: usize = 32;
 const MAX_DOCUMENT_MATERIALIZATIONS_PER_FRAME: usize = 1;
+const BACKGROUND_REPAINT_MS: u64 = 100;
+#[cfg(target_os = "linux")]
+const CONVERSION_ONLY_REPAINT_MS_LINUX: u64 = 750;
 const BUNDLED_PDF_MARKDOWN_STUDIO_LICENSE_TXT: &str = include_str!("../LICENSE");
 const BUNDLED_THIRD_PARTY_NOTICES_ALL_MD: &str =
     include_str!("../licenses/THIRD_PARTY_NOTICES_ALL.md");
@@ -1077,6 +1080,24 @@ impl PdfMarkdownApp {
             .any(|job| matches!(job.state, JobState::Pending | JobState::Running))
     }
 
+    #[cfg(target_os = "linux")]
+    fn has_non_conversion_background_work(&self) -> bool {
+        self.jobs.iter().any(|job| {
+            matches!(job.state, JobState::Pending | JobState::Running)
+                && !matches!(job.kind, JobKind::Conversion)
+        })
+    }
+
+    fn background_repaint_interval(&self) -> Duration {
+        #[cfg(target_os = "linux")]
+        {
+            if !self.has_non_conversion_background_work() {
+                return Duration::from_millis(CONVERSION_ONLY_REPAINT_MS_LINUX);
+            }
+        }
+        Duration::from_millis(BACKGROUND_REPAINT_MS)
+    }
+
     fn vlm_model_ready(&self) -> bool {
         configured_path_exists(&self.settings.vlm_model_path)
     }
@@ -2018,6 +2039,10 @@ impl PdfMarkdownApp {
                     self.maybe_start_next_conversion();
                 }
             }
+        }
+
+        if processed_events > 0 {
+            ctx.request_repaint();
         }
 
         for _ in 0..MAX_DOCUMENT_MATERIALIZATIONS_PER_FRAME {
@@ -4747,9 +4772,6 @@ impl PdfMarkdownApp {
 
 impl eframe::App for PdfMarkdownApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(
-            "PDF Markdown Studio".to_owned(),
-        ));
         self.process_background_events(ctx);
         self.ui_menu_bar(ctx);
         self.ui_top_panel(ctx);
@@ -4764,7 +4786,7 @@ impl eframe::App for PdfMarkdownApp {
         self.ui_logs_window(ctx);
 
         if self.has_background_work() {
-            ctx.request_repaint_after(Duration::from_millis(100));
+            ctx.request_repaint_after(self.background_repaint_interval());
         }
     }
 }

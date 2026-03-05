@@ -294,13 +294,9 @@ pub fn run_pdf_vlm(runtime_dir: &Path, request: &PdfVlmRequest) -> Result<(), St
         .map_err(format_error)
     };
 
-    let effective_threads = if request.n_threads > 0 {
-        request.n_threads
-    } else {
-        8
-    };
+    let effective_threads = resolve_effective_threads(request.n_threads);
     let effective_threads_batch = if request.n_threads_batch > 0 {
-        request.n_threads_batch
+        request.n_threads_batch.max(1)
     } else {
         effective_threads
     };
@@ -407,13 +403,9 @@ pub fn run_image_vlm(runtime_dir: &Path, request: &PdfVlmRequest) -> Result<(), 
     };
 
     let markdown = with_runtime_cwd(runtime_dir, || {
-        let effective_threads = if request.n_threads > 0 {
-            request.n_threads
-        } else {
-            8
-        };
+        let effective_threads = resolve_effective_threads(request.n_threads);
         let effective_threads_batch = if request.n_threads_batch > 0 {
-            request.n_threads_batch
+            request.n_threads_batch.max(1)
         } else {
             effective_threads
         };
@@ -669,6 +661,22 @@ fn cstr_from_mut(ptr: *mut c_char) -> String {
 fn describe_gpu(gpu: Option<i32>) -> String {
     gpu.map(|value| value.max(0).to_string())
         .unwrap_or_else(|| "cpu".to_owned())
+}
+
+fn resolve_effective_threads(requested_threads: i32) -> i32 {
+    if requested_threads > 0 {
+        return requested_threads.max(1);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let available = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(8);
+        return available.saturating_sub(1).max(1).min(8) as i32;
+    }
+
+    8
 }
 
 #[cfg(windows)]
