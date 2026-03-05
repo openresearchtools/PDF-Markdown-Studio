@@ -2,6 +2,30 @@ name: Build Desktop App
 
 on:
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Create a GitHub Release after build"
+        required: true
+        type: boolean
+        default: true
+      release_tag:
+        description: "Release tag (for example: v1.0.0). Required when create_release is enabled."
+        required: false
+        type: string
+      release_name:
+        description: "Optional release title override"
+        required: false
+        type: string
+      prerelease:
+        description: "Mark release as pre-release"
+        required: true
+        type: boolean
+        default: false
+      draft:
+        description: "Create release as draft"
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -196,12 +220,31 @@ jobs:
 
   publish_release:
     name: Publish Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ inputs.create_release }}
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - name: Validate release inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ inputs.release_tag }}" ]]; then
+            echo "release_tag is required when create_release=true."
+            exit 1
+          fi
+
+      - name: Resolve release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.release_name }}" ]]; then
+            echo "RELEASE_NAME=${{ inputs.release_name }}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_NAME=PDF Markdown Studio ${{ inputs.release_tag }}" >> "$GITHUB_ENV"
+          fi
+
       - name: Download Windows .zip artifact
         uses: actions/download-artifact@v4
         with:
@@ -226,7 +269,7 @@ jobs:
           set -euo pipefail
           ls -lah release-assets/windows release-assets/macos release-assets/linux
 
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ inputs.release_tag }}"
           REPO="${GITHUB_REPOSITORY}"
 
           WIN_FILE="pdf-markdown-studio-windows-x64.zip"
@@ -266,7 +309,11 @@ jobs:
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
         with:
-          name: PDF Markdown Studio ${{ github.ref_name }}
+          tag_name: ${{ inputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ env.RELEASE_NAME }}
+          prerelease: ${{ inputs.prerelease }}
+          draft: ${{ inputs.draft }}
           body_path: release-notes.md
           generate_release_notes: false
           files: |
