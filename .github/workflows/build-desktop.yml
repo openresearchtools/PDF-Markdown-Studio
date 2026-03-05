@@ -118,7 +118,7 @@ jobs:
         run: |
           set -euo pipefail
           deb_path="$(ls dist/*.deb | head -n 1)"
-          cp "$deb_path" "dist/pdf-markdown-studio-linux-amd64.deb"
+          cp "$deb_path" "dist/pdf-markdown-studio-ubuntu-amd64.deb"
 
       - name: Build macOS .app and .dmg package
         if: matrix.platform_key == 'macos-arm64'
@@ -157,7 +157,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pdf-markdown-studio-ubuntu-x64-deb
-          path: dist/pdf-markdown-studio-linux-amd64.deb
+          path: dist/pdf-markdown-studio-ubuntu-amd64.deb
           if-no-files-found: error
 
       - name: Upload macOS app/dmg artifact
@@ -294,24 +294,59 @@ jobs:
 
           WIN_FILE="pdf-markdown-studio-windows-x64.exe"
           MAC_FILE="pdf-markdown-studio-macos-arm64.dmg"
-          LINUX_FILE="pdf-markdown-studio-linux-amd64.deb"
+          UBU_FILE="pdf-markdown-studio-ubuntu-amd64.deb"
+          SUM_FILE="SHA256SUMS.txt"
 
           WIN_URL="https://github.com/${REPO}/releases/download/${TAG}/${WIN_FILE}"
           MAC_URL="https://github.com/${REPO}/releases/download/${TAG}/${MAC_FILE}"
-          LINUX_URL="https://github.com/${REPO}/releases/download/${TAG}/${LINUX_FILE}"
+          UBU_URL="https://github.com/${REPO}/releases/download/${TAG}/${UBU_FILE}"
+          SUM_URL="https://github.com/${REPO}/releases/download/${TAG}/${SUM_FILE}"
+
+          sha256sum "release-assets/windows/${WIN_FILE}" | sed 's|release-assets/windows/||' > "${SUM_FILE}"
+          sha256sum "release-assets/macos/${MAC_FILE}" | sed 's|release-assets/macos/||' >> "${SUM_FILE}"
+          sha256sum "release-assets/linux/${UBU_FILE}" | sed 's|release-assets/linux/||' >> "${SUM_FILE}"
 
           cat > release-notes.md <<EOF
           ## Downloads
 
-          - Windows x64: [${WIN_FILE}](${WIN_URL})
+          - Windows x64*: [pdf-markdown-studio-windows-x64](${WIN_URL})
           - macOS arm64: [${MAC_FILE}](${MAC_URL})
-          - Ubuntu x64: [${LINUX_FILE}](${LINUX_URL})
+          - Ubuntu x64 (.deb): [${UBU_FILE}](${UBU_URL})
+          - Checksums: [${SUM_FILE}](${SUM_URL})
 
           ## Quick Install (Ubuntu)
 
           \`\`\`bash
-          curl -L "${LINUX_URL}" -o /tmp/${LINUX_FILE} && sudo apt install -y /tmp/${LINUX_FILE}
+          curl -L "${UBU_URL}" -o /tmp/${UBU_FILE} && sudo apt install -y /tmp/${UBU_FILE}
           \`\`\`
+
+          ## Unsigned Build Notice
+
+          This app is an open-source hobby development effort by the repository owner. We do not currently have funding for full paid code-signing and notarization pipelines across all platforms/releases.
+
+          Because of that, operating-system protections or hardened security environments (for example Windows SmartScreen, enterprise endpoint controls, or macOS Gatekeeper policies) may block unsigned binaries.
+
+          If your environment blocks unsigned binaries, the recommended path is:
+
+          - build this desktop app from source on the target device,
+          - build Openresearchtools-Engine from source on the same target device,
+          - and use those locally-built artifacts in your deployment.
+
+          ### Windows (when blocked)
+
+          - If SmartScreen shows "Windows protected your PC", use More info -> Run anyway only if your policy allows it.
+          - In the app, go to Settings -> Runtime Setup and run:
+            - Download/Repair runtime
+            - Unblock unsigned runtime
+            - Recheck
+          - The Windows unblock script clears Mark-of-the-Web flags in the selected runtime directory by running Unblock-File recursively on runtime files.
+
+          ### macOS (when blocked)
+
+          - Try Right click -> Open on first launch.
+          - If blocked by Gatekeeper, use System Settings -> Privacy & Security -> Open Anyway when available and policy permits.
+          - In the app, after runtime install/repair, click Unblock unsigned runtime then Recheck.
+          - The macOS unblock script removes quarantine attributes recursively (xattr -dr com.apple.quarantine) and restores executable bits for runtime binaries/scripts where needed (chmod +x on relevant files).
           EOF
 
       - name: Publish GitHub release assets
@@ -327,4 +362,5 @@ jobs:
           files: |
             release-assets/windows/pdf-markdown-studio-windows-x64.exe
             release-assets/macos/pdf-markdown-studio-macos-arm64.dmg
-            release-assets/linux/pdf-markdown-studio-linux-amd64.deb
+            release-assets/linux/pdf-markdown-studio-ubuntu-amd64.deb
+            SHA256SUMS.txt
