@@ -130,14 +130,6 @@ exec /opt/pdf-markdown-studio/pdf_markdown_studio "$@"
         icon_dir / "pdf-markdown-studio.png",
         mode=0o644,
     )
-    copy_file(repo_root / "LICENSE", opt_root / "LICENSE", mode=0o644)
-    copy_file(repo_root / "README.md", opt_root / "README.md", mode=0o644)
-    shutil.copytree(repo_root / "licenses", opt_root / "licenses", dirs_exist_ok=True)
-    shutil.copytree(
-        repo_root / "runtime-manifests",
-        opt_root / "runtime-manifests",
-        dirs_exist_ok=True,
-    )
     deb_path = output_dir / f"{package_name}_{deb_version}_amd64.deb"
     if deb_path.exists():
         deb_path.unlink()

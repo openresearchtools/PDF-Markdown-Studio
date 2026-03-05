@@ -15,6 +15,10 @@ use crate::app_config::AppPaths;
 
 pub const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/openresearchtools/engine/releases/latest/download/engine-manifest.json";
+const BUNDLED_ENGINE_MANIFEST_JSON: &str =
+    include_str!("../runtime-manifests/engine-manifest.json");
+const BUNDLED_ENGINE_MANIFEST_SOURCES_JSON: &str =
+    include_str!("../runtime-manifests/engine-manifest-sources.json");
 
 const APP_UA: &str = "PDFConverter/1.0";
 
@@ -311,6 +315,18 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 
 fn load_manifest_sources(paths: &AppPaths) -> Vec<String> {
     let mut out = vec![DEFAULT_MANIFEST_URL.to_owned()];
+    if let Ok(parsed) = serde_json::from_str::<ManifestSources>(BUNDLED_ENGINE_MANIFEST_SOURCES_JSON)
+    {
+        for source in parsed.sources {
+            let source = source.trim();
+            if source.is_empty() {
+                continue;
+            }
+            if !out.iter().any(|known| known.eq_ignore_ascii_case(source)) {
+                out.push(source.to_owned());
+            }
+        }
+    }
     for candidate in manifest_sources_candidates(paths) {
         if !candidate.exists() {
             continue;
@@ -357,6 +373,11 @@ pub fn load_engine_manifest(paths: &AppPaths) -> Result<EngineManifest, String> 
             },
             Err(err) => errors.push(format!("{}: {err}", file.display())),
         }
+    }
+
+    match parse_manifest(BUNDLED_ENGINE_MANIFEST_JSON) {
+        Ok(manifest) => return Ok(manifest),
+        Err(err) => errors.push(format!("bundled manifest: {err}")),
     }
 
     let client = Client::builder()

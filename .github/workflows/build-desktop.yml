@@ -93,38 +93,15 @@ jobs:
           --check-only
           --selection-out dist/runtime-selection-${{ matrix.platform_key }}.json
 
-      - name: Assemble bundle
+      - name: Normalize Windows .exe filename
+        if: matrix.platform_key == 'windows-x64'
         shell: pwsh
         run: |
-          $repoRoot = Resolve-Path .
-          $bundleRoot = Join-Path $repoRoot "dist/bundle-${{ matrix.platform_key }}"
-          $binaryPath = Join-Path $repoRoot "target/${{ matrix.target }}/release/${{ matrix.binary_name }}"
-
+          $binaryPath = "target/${{ matrix.target }}/release/${{ matrix.binary_name }}"
           if (!(Test-Path $binaryPath)) {
             throw "Built binary not found: $binaryPath"
           }
-
-          if (Test-Path $bundleRoot) {
-            Remove-Item -Recurse -Force $bundleRoot
-          }
-          New-Item -ItemType Directory -Path $bundleRoot | Out-Null
-          New-Item -ItemType Directory -Path (Join-Path $bundleRoot "runtime-manifests") | Out-Null
-
-          Copy-Item $binaryPath (Join-Path $bundleRoot "${{ matrix.binary_name }}") -Force
-          Copy-Item "runtime-manifests/engine-manifest.json" (Join-Path $bundleRoot "runtime-manifests/engine-manifest.json") -Force
-          Copy-Item "runtime-manifests/engine-manifest-sources.json" (Join-Path $bundleRoot "runtime-manifests/engine-manifest-sources.json") -Force
-          Copy-Item "LICENSE" (Join-Path $bundleRoot "LICENSE") -Force
-          Copy-Item "README.md" (Join-Path $bundleRoot "README.md") -Force
-          Copy-Item -Recurse -Force "licenses" (Join-Path $bundleRoot "licenses")
-          Copy-Item "dist/runtime-selection-${{ matrix.platform_key }}.json" (Join-Path $bundleRoot "runtime-selection.json") -Force
-
-          $buildInfo = @(
-            "app=pdf_markdown_studio"
-            "target=${{ matrix.target }}"
-            "platform_key=${{ matrix.platform_key }}"
-            "runtime_manifest=runtime-manifests/engine-manifest.json"
-          )
-          $buildInfo | Set-Content -Path (Join-Path $bundleRoot "BUILD_INFO.txt") -Encoding utf8
+          Copy-Item $binaryPath "dist/pdf-markdown-studio-windows-x64.exe" -Force
 
       - name: Build Ubuntu .deb package
         if: matrix.platform_key == 'ubuntu-x64'
@@ -167,29 +144,12 @@ jobs:
           dmg_path="$(ls dist/*.dmg | head -n 1)"
           cp "$dmg_path" "dist/pdf-markdown-studio-macos-arm64.dmg"
 
-      - name: Package Windows .zip bundle
-        if: matrix.platform_key == 'windows-x64'
-        shell: pwsh
-        run: |
-          $zipPath = "dist/pdf-markdown-studio-windows-x64.zip"
-          if (Test-Path $zipPath) {
-            Remove-Item $zipPath -Force
-          }
-          Compress-Archive -Path "dist/bundle-windows-x64/*" -DestinationPath $zipPath
-
-      - name: Upload bundle artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: pdf-markdown-studio-${{ matrix.platform_key }}
-          path: dist/bundle-${{ matrix.platform_key }}
-          if-no-files-found: error
-
-      - name: Upload Windows .zip artifact
+      - name: Upload Windows .exe artifact
         if: matrix.platform_key == 'windows-x64'
         uses: actions/upload-artifact@v4
         with:
-          name: pdf-markdown-studio-windows-x64-zip
-          path: dist/pdf-markdown-studio-windows-x64.zip
+          name: pdf-markdown-studio-windows-x64-exe
+          path: dist/pdf-markdown-studio-windows-x64.exe
           if-no-files-found: error
 
       - name: Upload Ubuntu .deb artifact
@@ -305,10 +265,10 @@ jobs:
             echo "RELEASE_NAME=PDF Markdown Studio ${release_tag}" >> "$GITHUB_ENV"
           fi
 
-      - name: Download Windows .zip artifact
+      - name: Download Windows .exe artifact
         uses: actions/download-artifact@v4
         with:
-          name: pdf-markdown-studio-windows-x64-zip
+          name: pdf-markdown-studio-windows-x64-exe
           path: release-assets/windows
 
       - name: Download macOS .dmg artifact
@@ -332,7 +292,7 @@ jobs:
           TAG="${RELEASE_TAG}"
           REPO="${GITHUB_REPOSITORY}"
 
-          WIN_FILE="pdf-markdown-studio-windows-x64.zip"
+          WIN_FILE="pdf-markdown-studio-windows-x64.exe"
           MAC_FILE="pdf-markdown-studio-macos-arm64.dmg"
           LINUX_FILE="pdf-markdown-studio-linux-amd64.deb"
 
@@ -352,18 +312,6 @@ jobs:
           \`\`\`bash
           curl -L "${LINUX_URL}" -o /tmp/${LINUX_FILE} && sudo apt install -y /tmp/${LINUX_FILE}
           \`\`\`
-
-          ## Quick Download Commands
-
-          Windows (PowerShell):
-          \`\`\`powershell
-          Invoke-WebRequest -Uri "${WIN_URL}" -OutFile "${WIN_FILE}"
-          \`\`\`
-
-          macOS:
-          \`\`\`bash
-          curl -L "${MAC_URL}" -o "${MAC_FILE}"
-          \`\`\`
           EOF
 
       - name: Publish GitHub release assets
@@ -377,6 +325,6 @@ jobs:
           body_path: release-notes.md
           generate_release_notes: false
           files: |
-            release-assets/windows/pdf-markdown-studio-windows-x64.zip
+            release-assets/windows/pdf-markdown-studio-windows-x64.exe
             release-assets/macos/pdf-markdown-studio-macos-arm64.dmg
             release-assets/linux/pdf-markdown-studio-linux-amd64.deb

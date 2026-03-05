@@ -116,10 +116,6 @@ mkdir -p "$macos_dir" "$resources_dir" "$dmg_root"
 cp "$binary_path" "$macos_dir/$binary_name"
 chmod 755 "$macos_dir/$binary_name"
 
-mkdir -p "$macos_dir/runtime-manifests"
-cp "$repo_root/runtime-manifests/engine-manifest.json" "$macos_dir/runtime-manifests/engine-manifest.json"
-cp "$repo_root/runtime-manifests/engine-manifest-sources.json" "$macos_dir/runtime-manifests/engine-manifest-sources.json"
-
 icon_plist_block=""
 if [[ -n "$icon_path" ]]; then
   if [[ ! -f "$icon_path" ]]; then
