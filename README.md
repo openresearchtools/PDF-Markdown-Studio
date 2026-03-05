@@ -107,7 +107,7 @@ If adding many files feels slow:
 
 ## Acknowledgements (What This App Uses)
 
-This app uses OpenResearchTools Engine runtime components for PDF and VLM execution. For this app's active feature set, key upstream technologies include:
+This app uses OpenResearchTools Engine runtime components for PDF and VLM execution `https://github.com/openresearchtools/engine`. For this app's active feature set, key upstream technologies include:
 
 - `egui / eframe` (desktop GUI framework)
 - `llama.cpp`
@@ -116,12 +116,7 @@ This app uses OpenResearchTools Engine runtime components for PDF and VLM execut
 
 This project is independent and is **not affiliated with, sponsored by, or endorsed by** `egui`, `llama.cpp`, `PDFium`, `Qwen`, or other upstream projects/vendors.
 
-Audio-focused runtime components (for example `FFmpeg`/`pyannote.audio`) are intentionally not in scope for this GUI app's core workflow.
 
-References:
-
-- Engine repository: `https://github.com/openresearchtools/engine`
-- Engine acknowledgements/affiliation section: `https://github.com/openresearchtools/engine#project-status-and-affiliation`
 
 ## How to cite
 
@@ -144,19 +139,3 @@ BibTeX:
 }
 ```
 
-## For Developers (Short)
-
-- Build:
-  - `cargo build`
-- Run:
-  - `cargo run`
-
-macOS local setup + package build:
-
-- `bash scripts/setup_macos_build_env.sh`
-- `bash scripts/build_macos_dmg.sh --repo-root . --output-dir dist`
-- Optional icon: place `AppIcon.icns` at `logo/macos/AppIcon.icns` (auto-detected by CI and local script; `--icon` still works).
-
-GitHub Actions workflow:
-
-- `.github/workflows/build-desktop.yml`
