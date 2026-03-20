@@ -13,68 +13,155 @@ use std::time::Duration;
 
 use chrono::Local;
 use eframe::egui::{
-    self, Align, Color32, ColorImage, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
-    IconData, RichText, ScrollArea, Stroke, Vec2,
+    self, Align, Color32, ColorImage, CornerRadius, FontFamily, FontId, IconData, RichText,
+    ScrollArea, Stroke, Vec2,
 };
+#[cfg(target_os = "windows")]
+use eframe::egui::{FontData, FontDefinitions};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use pdfium_render::prelude::*;
 
 use app_config::{
     AppPaths, AppSettings, ConversionMode, DEFAULT_IMAGE_VLM_PROMPT, DEFAULT_VLM_PROMPT, app_paths,
-    ensure_dirs, load_settings, runtime_dir_from_settings, save_settings,
+    default_runtime_dir, ensure_dirs, load_settings, runtime_dir_from_settings, save_settings,
 };
 use engine_bindings::{
     EngineDevice, PdfVlmRequest, list_bridge_devices, run_image_vlm, run_pdf_fast, run_pdf_vlm,
     runtime_pdfium_library_path,
 };
+#[cfg(target_os = "windows")]
+use runtime_manager::detect_installed_runtime_backend;
 use runtime_manager::{
-    EngineManifest, ManifestAsset, RuntimeCheck, check_runtime_dir,
-    detect_installed_runtime_backend, filtered_assets_for_platform, install_runtime_asset,
-    load_engine_manifest,
+    EngineManifest, ManifestAsset, RuntimeCheck, check_runtime_dir, filtered_assets_for_platform,
+    install_runtime_asset, load_engine_manifest,
 };
 
 #[derive(Clone, Copy, Debug)]
 struct ModelComboPreset {
-    label: &'static str,
+    family_label: &'static str,
+    variant_label: &'static str,
     requirement: &'static str,
+    repo_id: &'static str,
     model_url: &'static str,
     model_file: &'static str,
+    model_size_bytes: u64,
     mmproj_url: &'static str,
     mmproj_file: &'static str,
+    mmproj_size_bytes: u64,
     repo_url: &'static str,
     notes: &'static str,
 }
 
-const MODEL_COMBO_PRESETS: [ModelComboPreset; 3] = [
+impl ModelComboPreset {
+    fn dropdown_label(self) -> String {
+        format!("{} \u{00b7} {}", self.family_label, self.variant_label)
+    }
+
+    fn total_download_bytes(self) -> u64 {
+        self.model_size_bytes + self.mmproj_size_bytes
+    }
+
+    fn repo_dir(self, models_root: &Path) -> PathBuf {
+        let mut path = models_root.to_path_buf();
+        for segment in self.repo_id.split('/') {
+            path.push(segment);
+        }
+        path
+    }
+
+    fn model_destination(self, models_root: &Path) -> PathBuf {
+        self.repo_dir(models_root).join(self.model_file)
+    }
+
+    fn mmproj_destination(self, models_root: &Path) -> PathBuf {
+        self.repo_dir(models_root).join(self.mmproj_file)
+    }
+}
+
+const MODEL_COMBO_PRESETS: [ModelComboPreset; 6] = [
     ModelComboPreset {
-        label: "Qwen3-VL-8B-Instruct Q8_0 (Recommended)",
-        requirement: "~16 GB RAM/VRAM",
-        model_url: "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/Qwen3VL-8B-Instruct-Q8_0.gguf?download=true",
-        model_file: "Qwen3VL-8B-Instruct-Q8_0.gguf",
-        mmproj_url: "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-8B-Instruct-F16.gguf?download=true",
-        mmproj_file: "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
-        repo_url: "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF",
-        notes: "Best quality preset. Typically comfortable with n_ctx=32768 and n_parallel=4 on a 16 GB VRAM GPU.",
+        family_label: "Qwen3.5 9B",
+        variant_label: "4-bit (Recommended)",
+        requirement: "Best on ~12+ GiB VRAM or 16+ GiB unified memory",
+        repo_id: "openresearchtools/Qwen3.5-9B-GGUF",
+        model_url: "https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf?download=true",
+        model_file: "Qwen3.5-9B-Q4_K_M.gguf",
+        model_size_bytes: 5_629_109_056,
+        mmproj_url: "https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-mmproj-f16.gguf?download=true",
+        mmproj_file: "Qwen3.5-9B-mmproj-f16.gguf",
+        mmproj_size_bytes: 918_165_920,
+        repo_url: "https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF",
+        notes: "Recommended balance for PDF/image extraction quality versus runtime size.",
     },
     ModelComboPreset {
-        label: "Qwen3-VL-4B-Instruct Q8_0",
-        requirement: "~12 GB RAM/VRAM",
-        model_url: "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/Qwen3VL-4B-Instruct-Q8_0.gguf?download=true",
-        model_file: "Qwen3VL-4B-Instruct-Q8_0.gguf",
-        mmproj_url: "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-4B-Instruct-F16.gguf?download=true",
-        mmproj_file: "mmproj-Qwen3VL-4B-Instruct-F16.gguf",
-        repo_url: "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF",
-        notes: "Balanced speed/quality preset for lower-memory devices.",
+        family_label: "Qwen3.5 9B",
+        variant_label: "8-bit",
+        requirement: "Best on ~20+ GiB VRAM or large unified-memory Macs",
+        repo_id: "openresearchtools/Qwen3.5-9B-GGUF",
+        model_url: "https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q8_0.gguf?download=true",
+        model_file: "Qwen3.5-9B-Q8_0.gguf",
+        model_size_bytes: 9_527_501_632,
+        mmproj_url: "https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-mmproj-f16.gguf?download=true",
+        mmproj_file: "Qwen3.5-9B-mmproj-f16.gguf",
+        mmproj_size_bytes: 918_165_920,
+        repo_url: "https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF",
+        notes: "Highest-quality shared preset here, but much heavier to download and run.",
     },
     ModelComboPreset {
-        label: "Qwen3-VL-2B-Instruct Q8_0",
-        requirement: "~8 GB RAM/VRAM",
-        model_url: "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF/resolve/main/Qwen3VL-2B-Instruct-Q8_0.gguf?download=true",
-        model_file: "Qwen3VL-2B-Instruct-Q8_0.gguf",
-        mmproj_url: "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-2B-Instruct-F16.gguf?download=true",
-        mmproj_file: "mmproj-Qwen3VL-2B-Instruct-F16.gguf",
-        repo_url: "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF",
-        notes: "Lowest-memory preset; useful when GPU/VRAM is limited.",
+        family_label: "Qwen3.5 4B",
+        variant_label: "4-bit",
+        requirement: "Good fit for ~8+ GiB VRAM or 12+ GiB unified memory",
+        repo_id: "openresearchtools/Qwen3.5-4B-GGUF",
+        model_url: "https://huggingface.co/openresearchtools/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf?download=true",
+        model_file: "Qwen3.5-4B-Q4_K_M.gguf",
+        model_size_bytes: 2_708_804_448,
+        mmproj_url: "https://huggingface.co/openresearchtools/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-mmproj-f16.gguf?download=true",
+        mmproj_file: "Qwen3.5-4B-mmproj-f16.gguf",
+        mmproj_size_bytes: 672_423_520,
+        repo_url: "https://huggingface.co/openresearchtools/Qwen3.5-4B-GGUF",
+        notes: "Strong mid-range option when 9B is heavier than the target machine can handle.",
+    },
+    ModelComboPreset {
+        family_label: "Qwen3.5 4B",
+        variant_label: "8-bit",
+        requirement: "Best on ~12+ GiB VRAM or roomy unified memory",
+        repo_id: "openresearchtools/Qwen3.5-4B-GGUF",
+        model_url: "https://huggingface.co/openresearchtools/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q8_0.gguf?download=true",
+        model_file: "Qwen3.5-4B-Q8_0.gguf",
+        model_size_bytes: 4_482_403_168,
+        mmproj_url: "https://huggingface.co/openresearchtools/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-mmproj-f16.gguf?download=true",
+        mmproj_file: "Qwen3.5-4B-mmproj-f16.gguf",
+        mmproj_size_bytes: 672_423_520,
+        repo_url: "https://huggingface.co/openresearchtools/Qwen3.5-4B-GGUF",
+        notes: "Sharper than 4-bit, but a noticeably bigger download and runtime footprint.",
+    },
+    ModelComboPreset {
+        family_label: "Qwen3.5 2B",
+        variant_label: "4-bit",
+        requirement: "Lowest-footprint preset; useful on smaller machines",
+        repo_id: "openresearchtools/Qwen3.5-2B-GGUF",
+        model_url: "https://huggingface.co/openresearchtools/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf?download=true",
+        model_file: "Qwen3.5-2B-Q4_K_M.gguf",
+        model_size_bytes: 1_274_396_608,
+        mmproj_url: "https://huggingface.co/openresearchtools/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-mmproj-f16.gguf?download=true",
+        mmproj_file: "Qwen3.5-2B-mmproj-f16.gguf",
+        mmproj_size_bytes: 668_227_168,
+        repo_url: "https://huggingface.co/openresearchtools/Qwen3.5-2B-GGUF",
+        notes: "Best fallback when machine limits are tight and you still need vision support.",
+    },
+    ModelComboPreset {
+        family_label: "Qwen3.5 2B",
+        variant_label: "8-bit",
+        requirement: "Better quality than 2B 4-bit with a modest size increase",
+        repo_id: "openresearchtools/Qwen3.5-2B-GGUF",
+        model_url: "https://huggingface.co/openresearchtools/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q8_0.gguf?download=true",
+        model_file: "Qwen3.5-2B-Q8_0.gguf",
+        model_size_bytes: 2_012_012_480,
+        mmproj_url: "https://huggingface.co/openresearchtools/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-mmproj-f16.gguf?download=true",
+        mmproj_file: "Qwen3.5-2B-mmproj-f16.gguf",
+        mmproj_size_bytes: 668_227_168,
+        repo_url: "https://huggingface.co/openresearchtools/Qwen3.5-2B-GGUF",
+        notes: "Higher-quality 2B option when 4B and 9B are still too large for the target device.",
     },
 ];
 const FAST_MACHINE_READABILITY_HINT_A: &str = "machine-readability gate rejected";
@@ -533,7 +620,7 @@ impl PdfMarkdownApp {
             Err(err) => {
                 startup_status = format!("Failed to load settings: {err}");
                 let mut defaults = AppSettings::default();
-                defaults.runtime_dir = paths.runtime_shared_dir.display().to_string();
+                defaults.runtime_dir = default_runtime_dir(&paths).display().to_string();
                 defaults
             }
         };
@@ -647,7 +734,11 @@ impl PdfMarkdownApp {
         app.sync_runtime_backend_from_installed_runtime();
 
         if app.runtime_check.is_ok() {
-            app.ensure_devices_enumerated_for_runtime();
+            if runtime_unblock_required_for_platform() {
+                app.start_runtime_prepare(false);
+            } else {
+                app.ensure_devices_enumerated_for_runtime();
+            }
         }
 
         app
@@ -1148,7 +1239,7 @@ impl PdfMarkdownApp {
     }
 
     fn ensure_devices_enumerated_for_runtime(&mut self) {
-        if self.device_enumeration_in_progress {
+        if self.device_enumeration_in_progress || self.runtime_maintenance_in_progress() {
             return;
         }
         self.refresh_runtime_state();
@@ -1511,6 +1602,14 @@ impl PdfMarkdownApp {
     }
 
     fn queue_conversion_for_index(&mut self, doc_index: usize) -> Result<&'static str, String> {
+        if self.runtime_maintenance_in_progress() {
+            let message =
+                "Runtime maintenance is still running. Wait a moment, then try conversion again."
+                    .to_owned();
+            self.status_message = message.clone();
+            self.push_log(LogLevel::Warn, message.clone());
+            return Err(message);
+        }
         self.refresh_runtime_state();
         if !self.runtime_check.is_ok() {
             let message = format!(
@@ -1731,17 +1830,15 @@ impl PdfMarkdownApp {
                     self.runtime_download_in_progress = false;
                     match result {
                         Ok(()) => {
-                            self.runtime_post_install_prompt =
-                                runtime_unblock_required_for_platform();
+                            self.runtime_post_install_prompt = false;
                             self.runtime_status = if runtime_unblock_required_for_platform() {
-                                "Runtime install complete. Run 'Unblock unsigned runtime', then reload runtime check.".to_owned()
+                                "Runtime install complete. Preparing runtime for use...".to_owned()
                             } else {
                                 "Runtime install complete.".to_owned()
                             };
                             self.status_message = self.runtime_status.clone();
                             self.refresh_runtime_state();
                             self.reset_device_enumeration_cache();
-                            self.ensure_devices_enumerated_for_runtime();
                             self.runtime_popup_open = true;
                             self.settings_window_open = true;
                             self.update_job_state(
@@ -1751,6 +1848,11 @@ impl PdfMarkdownApp {
                                 Some(100.0),
                             );
                             self.push_log(LogLevel::Info, self.runtime_status.clone());
+                            if runtime_unblock_required_for_platform() {
+                                self.start_runtime_prepare(true);
+                            } else {
+                                self.ensure_devices_enumerated_for_runtime();
+                            }
                         }
                         Err(err) => {
                             self.runtime_post_install_prompt = false;
@@ -1885,7 +1987,7 @@ impl PdfMarkdownApp {
                                 {
                                     let preset = Self::model_combo_preset(pending_combo_index);
                                     let mmproj_destination =
-                                        self.paths.models_dir.join(preset.mmproj_file);
+                                        preset.mmproj_destination(&self.paths.models_dir);
                                     self.runtime_status = format!(
                                         "Model downloaded. Starting MMProj download to '{}'.",
                                         mmproj_destination.display()
@@ -1895,13 +1997,15 @@ impl PdfMarkdownApp {
                                     self.start_model_download_with(
                                         preset.mmproj_url.to_owned(),
                                         preset.mmproj_file.to_owned(),
+                                        mmproj_destination,
                                         ModelDownloadPurpose::Mmproj,
                                     );
                                 }
                             } else if matches!(purpose, ModelDownloadPurpose::Mmproj) {
+                                let preset = self.current_model_combo_preset();
                                 self.runtime_status = format!(
                                     "Model combo downloaded to '{}'.",
-                                    self.paths.models_dir.display()
+                                    preset.repo_dir(&self.paths.models_dir).display()
                                 );
                                 self.status_message = self.runtime_status.clone();
                                 self.push_log(LogLevel::Info, self.runtime_status.clone());
@@ -2194,7 +2298,7 @@ impl PdfMarkdownApp {
         self.runtime_download_in_progress || self.runtime_unblock_in_progress
     }
 
-    fn start_runtime_unblock(&mut self) {
+    fn start_runtime_prepare(&mut self, show_runtime_window: bool) {
         if !runtime_unblock_required_for_platform() {
             self.runtime_status = "Unsigned runtime unblock is not required on Linux.".to_owned();
             self.status_message = self.runtime_status.clone();
@@ -2209,8 +2313,11 @@ impl PdfMarkdownApp {
         let runtime_dir = self.effective_runtime_dir();
         self.settings.runtime_dir = runtime_dir.display().to_string();
         self.runtime_unblock_in_progress = true;
-        self.runtime_popup_open = true;
-        self.runtime_status = "Running unsigned runtime unblock script...".to_owned();
+        if show_runtime_window {
+            self.runtime_popup_open = true;
+            self.settings_window_open = true;
+        }
+        self.runtime_status = "Preparing runtime for use...".to_owned();
         self.status_message = self.runtime_status.clone();
         self.push_log(LogLevel::Info, self.runtime_status.clone());
 
@@ -2218,15 +2325,19 @@ impl PdfMarkdownApp {
         let paths = self.paths.clone();
         let job_id = self.create_job(
             JobKind::RuntimeInstall,
-            "Unblock unsigned runtime",
+            "Prepare runtime",
             JobState::Running,
-            "Applying unsigned runtime unblock script...",
+            "Applying runtime preparation script...",
         );
 
         thread::spawn(move || {
             let result = run_unsigned_runtime_unblock_script(&paths, &runtime_dir);
             let _ = tx.send(BackgroundEvent::RuntimeUnblocked { job_id, result });
         });
+    }
+
+    fn start_runtime_unblock(&mut self) {
+        self.start_runtime_prepare(true);
     }
 
     fn start_device_enumeration(&mut self) {
@@ -2256,6 +2367,7 @@ impl PdfMarkdownApp {
         &mut self,
         url: String,
         file_name: String,
+        destination: PathBuf,
         purpose: ModelDownloadPurpose,
     ) {
         if self.model_download_in_progress {
@@ -2274,7 +2386,6 @@ impl PdfMarkdownApp {
             return;
         }
 
-        let destination = self.paths.models_dir.join(&file_name);
         self.model_download_in_progress = true;
         self.runtime_status = format!("Starting model download to '{}'.", destination.display());
         self.settings.model_download_file_name = file_name;
@@ -2309,12 +2420,12 @@ impl PdfMarkdownApp {
             .selected_model_combo_preset
             .min(MODEL_COMBO_PRESETS.len().saturating_sub(1));
         let preset = Self::model_combo_preset(preset_index);
-        let model_destination = self.paths.models_dir.join(preset.model_file);
-        let mmproj_destination = self.paths.models_dir.join(preset.mmproj_file);
+        let model_destination = preset.model_destination(&self.paths.models_dir);
+        let mmproj_destination = preset.mmproj_destination(&self.paths.models_dir);
         self.runtime_status = format!(
             "Starting model combo download ({}) to '{}': '{}' then '{}'.",
-            preset.label,
-            self.paths.models_dir.display(),
+            preset.dropdown_label(),
+            preset.repo_dir(&self.paths.models_dir).display(),
             model_destination.display(),
             mmproj_destination.display()
         );
@@ -2325,6 +2436,7 @@ impl PdfMarkdownApp {
         self.start_model_download_with(
             preset.model_url.to_owned(),
             preset.model_file.to_owned(),
+            model_destination,
             ModelDownloadPurpose::Model,
         );
     }
@@ -3980,18 +4092,18 @@ impl PdfMarkdownApp {
                 }
 
                 ui.heading("Runtime");
-                ui.label("Canonical app storage (single root):");
+                ui.label("App data root:");
                 ui.monospace(self.paths.app_data_dir.display().to_string());
-                ui.label("Default runtime path:");
-                ui.monospace(self.paths.runtime_shared_dir.display().to_string());
+                ui.label("App runtime path:");
+                ui.monospace(self.paths.app_runtime_dir.display().to_string());
                 ui.label("Settings file:");
                 ui.monospace(self.paths.settings_json.display().to_string());
-                ui.label("Models directory:");
+                ui.label("Shared models root:");
                 ui.monospace(self.paths.models_dir.display().to_string());
                 ui.label("Conversion output:");
                 ui.label("Saved next to each source file as <source>FAST.md or <source>VLM.md");
                 ui.label(
-                    RichText::new("Note: to switch to a different runtime variant, first close all apps that use the shared runtime, delete the engine runtime folder, reopen this app, then download/repair the desired runtime.")
+                    RichText::new("This app now keeps its own Engine runtime under its app data folder. Shared models stay in the global OpenResearchTools models root.")
                         .small()
                         .color(Color32::from_rgb(89, 95, 105)),
                 );
@@ -4016,9 +4128,10 @@ impl PdfMarkdownApp {
                 ui.horizontal_wrapped(|ui| {
                     let runtime_busy = self.runtime_maintenance_in_progress();
                     let runtime_missing = !self.runtime_check.is_ok();
-                    if ui.button("Use default runtime dir").clicked() {
-                        self.settings.runtime_dir =
-                            self.paths.runtime_shared_dir.display().to_string();
+                    if ui.button("Use app runtime dir").clicked() {
+                        self.settings.runtime_dir = default_runtime_dir(&self.paths)
+                            .display()
+                            .to_string();
                         self.runtime_post_install_prompt = false;
                         self.refresh_runtime_state();
                         self.reset_device_enumeration_cache();
@@ -4231,7 +4344,7 @@ impl PdfMarkdownApp {
                         ui.label(RichText::new("Models").strong());
                         ui.label(
                             RichText::new(format!(
-                                "Model directory: {}",
+                                "Shared models root: {}",
                                 self.paths.models_dir.display()
                             ))
                             .small()
@@ -4310,21 +4423,15 @@ impl PdfMarkdownApp {
                             .min(MODEL_COMBO_PRESETS.len().saturating_sub(1));
                         let selected_preset = self.current_model_combo_preset();
                         ui.horizontal_wrapped(|ui| {
-                            ui.label("Suggested combo");
+                            ui.label("Recommended model bundle");
                             egui::ComboBox::from_id_salt("model_combo_preset")
-                                .selected_text(format!(
-                                    "{} ({})",
-                                    selected_preset.label, selected_preset.requirement
-                                ))
+                                .selected_text(selected_preset.dropdown_label())
                                 .show_ui(ui, |ui| {
                                     for (index, preset) in MODEL_COMBO_PRESETS.iter().enumerate() {
                                         ui.selectable_value(
                                             &mut self.selected_model_combo_preset,
                                             index,
-                                            format!(
-                                                "{} ({})",
-                                                preset.label, preset.requirement
-                                            ),
+                                            preset.dropdown_label(),
                                         );
                                     }
                                 });
@@ -4343,22 +4450,51 @@ impl PdfMarkdownApp {
                         });
                         ui.hyperlink_to("Selected combo repo (Hugging Face)", selected_preset.repo_url);
                         ui.label(
+                            RichText::new("License: Apache-2.0")
+                                .small()
+                                .color(Color32::from_rgb(89, 95, 105)),
+                        );
+                        ui.label(
                             RichText::new(format!(
-                                "Estimated memory requirement: {}",
+                                "Suggested runtime memory: {}",
                                 selected_preset.requirement
                             ))
                             .small()
                             .color(Color32::from_rgb(89, 95, 105)),
                         );
                         ui.label(
-                            RichText::new(format!("Model file: {}", selected_preset.model_file))
-                                .small()
-                                .color(Color32::from_rgb(89, 95, 105)),
+                            RichText::new(format!(
+                                "Selected model: {} / {}",
+                                selected_preset.family_label, selected_preset.variant_label
+                            ))
+                            .small()
+                            .color(Color32::from_rgb(89, 95, 105)),
                         );
                         ui.label(
-                            RichText::new(format!("MMProj file: {}", selected_preset.mmproj_file))
-                                .small()
-                                .color(Color32::from_rgb(89, 95, 105)),
+                            RichText::new(format!(
+                                "Model GGUF: {} ({})",
+                                selected_preset.model_file,
+                                Self::format_bytes(selected_preset.model_size_bytes)
+                            ))
+                            .small()
+                            .color(Color32::from_rgb(89, 95, 105)),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "MMProj GGUF: {} ({})",
+                                selected_preset.mmproj_file,
+                                Self::format_bytes(selected_preset.mmproj_size_bytes)
+                            ))
+                            .small()
+                            .color(Color32::from_rgb(89, 95, 105)),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "Total download: {}",
+                                Self::format_bytes(selected_preset.total_download_bytes())
+                            ))
+                            .small()
+                            .color(Color32::from_rgb(89, 95, 105)),
                         );
                         ui.label(
                             RichText::new(selected_preset.notes)
@@ -4368,7 +4504,7 @@ impl PdfMarkdownApp {
                         ui.label(
                             RichText::new(format!(
                                 "Selected combo downloads are saved to: {}",
-                                self.paths.models_dir.display()
+                                selected_preset.repo_dir(&self.paths.models_dir).display()
                             ))
                             .small()
                             .color(Color32::from_rgb(89, 95, 105)),
@@ -4739,7 +4875,35 @@ impl PdfMarkdownApp {
 
                 let Some(selected_index) = self.selected_doc_index() else {
                     ui.centered_and_justified(|ui| {
-                        ui.label("No document selected.");
+                        if self.documents.is_empty() {
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    RichText::new("No PDFs or images are open.")
+                                        .strong()
+                                        .size(18.0),
+                                );
+                                ui.add_space(8.0);
+                                if ui
+                                    .add_sized(
+                                        [220.0, 40.0],
+                                        egui::Button::new(
+                                            RichText::new("Add PDFs / Images").strong(),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.pick_and_add_files();
+                                }
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new("Pick files here when the workspace is empty.")
+                                        .small()
+                                        .color(Color32::from_rgb(99, 104, 114)),
+                                );
+                            });
+                        } else {
+                            ui.label("No document selected.");
+                        }
                     });
                     return;
                 };

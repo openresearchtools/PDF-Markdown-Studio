@@ -237,6 +237,7 @@ pub fn check_runtime_dir(runtime_dir: &Path) -> RuntimeCheck {
     check
 }
 
+#[cfg(target_os = "windows")]
 pub fn detect_installed_runtime_backend(runtime_dir: &Path) -> Option<String> {
     #[cfg(target_os = "windows")]
     {
@@ -315,7 +316,8 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 
 fn load_manifest_sources(paths: &AppPaths) -> Vec<String> {
     let mut out = vec![DEFAULT_MANIFEST_URL.to_owned()];
-    if let Ok(parsed) = serde_json::from_str::<ManifestSources>(BUNDLED_ENGINE_MANIFEST_SOURCES_JSON)
+    if let Ok(parsed) =
+        serde_json::from_str::<ManifestSources>(BUNDLED_ENGINE_MANIFEST_SOURCES_JSON)
     {
         for source in parsed.sources {
             let source = source.trim();

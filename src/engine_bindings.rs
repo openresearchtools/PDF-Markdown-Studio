@@ -57,6 +57,7 @@ struct llama_server_bridge {
 struct llama_server_bridge_params {
     model_path: *const c_char,
     mmproj_path: *const c_char,
+    cluster_instance_name: *const c_char,
     n_ctx: i32,
     n_batch: i32,
     n_ubatch: i32,
@@ -72,6 +73,11 @@ struct llama_server_bridge_params {
     seed: i32,
     ctx_shift: i32,
     kv_unified: i32,
+    use_mmap: i32,
+    use_direct_io: i32,
+    use_mlock: i32,
+    no_host: i32,
+    no_extra_bufts: i32,
     devices: *const c_char,
     tensor_split: *const c_char,
     split_mode: i32,
@@ -100,6 +106,9 @@ struct llama_server_bridge_vlm_request {
     dry_multiplier: f32,
     dry_allowed_length: i32,
     dry_penalty_last_n: i32,
+    reasoning: *const c_char,
+    reasoning_budget: i32,
+    reasoning_format: *const c_char,
 }
 
 #[repr(C)]
@@ -241,6 +250,8 @@ pub fn run_pdf_vlm(runtime_dir: &Path, request: &PdfVlmRequest) -> Result<(), St
             args.push("--prompt".to_owned());
             args.push(request.prompt.clone());
         }
+        args.push("--reasoning".to_owned());
+        args.push("off".to_owned());
 
         args.push("--n-predict".to_owned());
         args.push(request.n_predict.to_string());
@@ -352,6 +363,8 @@ pub fn run_image_vlm(runtime_dir: &Path, request: &PdfVlmRequest) -> Result<(), 
         request.prompt.clone()
     };
     let prompt_c = CString::new(prompt_text).map_err(|_| "prompt contains NUL byte".to_owned())?;
+    let reasoning_off_c =
+        CString::new("off").map_err(|_| "reasoning mode contains NUL byte".to_owned())?;
     let cpu_only_devices_c = if request.gpu.is_none() {
         Some(CString::new("none").map_err(|_| "devices contains NUL byte".to_owned())?)
     } else {
@@ -438,6 +451,9 @@ pub fn run_image_vlm(runtime_dir: &Path, request: &PdfVlmRequest) -> Result<(), 
             params.no_kv_offload = 0;
             params.kv_unified = 1;
             params.ctx_shift = 1;
+            params.use_mmap = 0;
+            params.use_direct_io = 0;
+            params.use_mlock = 0;
             params.tensor_split = ptr::null();
             params.embedding = 0;
             params.reranking = 0;
@@ -476,6 +492,8 @@ pub fn run_image_vlm(runtime_dir: &Path, request: &PdfVlmRequest) -> Result<(), 
         req_ffi.top_k = -1;
         req_ffi.min_p = -1.0;
         req_ffi.seed = -1;
+        req_ffi.reasoning = reasoning_off_c.as_ptr();
+        req_ffi.reasoning_budget = 0;
 
         let mut out = unsafe { empty_vlm_result() };
         let rc = unsafe { bridge_vlm_complete(bridge, &req_ffi, &mut out) };

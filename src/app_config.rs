@@ -13,7 +13,7 @@ pub struct AppPaths {
     pub base_data_dir: PathBuf,
     pub app_config_dir: PathBuf,
     pub app_data_dir: PathBuf,
-    pub runtime_shared_dir: PathBuf,
+    pub app_runtime_dir: PathBuf,
     pub models_dir: PathBuf,
     pub settings_json: PathBuf,
     pub manifest_cache_dir: PathBuf,
@@ -83,7 +83,9 @@ fn normalized_path_key(path: &Path) -> String {
 
 fn runtime_dir_is_legacy_default(path: &Path, paths: &AppPaths) -> bool {
     let legacy = paths.base_config_dir.join("engine-runtime");
+    let old_shared = paths.base_data_dir.join("engine");
     normalized_path_key(path) == normalized_path_key(&legacy)
+        || normalized_path_key(path) == normalized_path_key(&old_shared)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -156,8 +158,8 @@ pub fn app_paths() -> Result<AppPaths, String> {
     let (ort_config_root, ort_data_root) = openresearchtools_roots()?;
     let app_config_dir = ort_config_root.join("PDF Markdown Studio");
     let app_data_dir = ort_data_root.join("PDF Markdown Studio");
-    let runtime_shared_dir = ort_data_root.join("engine");
-    let models_dir = ort_data_root.join("Models").join("Vision");
+    let app_runtime_dir = app_data_dir.join("Engine");
+    let models_dir = ort_data_root.join("models");
     let manifest_cache_dir = app_config_dir.join("runtime-manifests");
     let settings_json = app_config_dir.join("settings.json");
 
@@ -166,7 +168,7 @@ pub fn app_paths() -> Result<AppPaths, String> {
         base_data_dir: ort_data_root,
         app_config_dir,
         app_data_dir,
-        runtime_shared_dir,
+        app_runtime_dir,
         models_dir,
         settings_json,
         manifest_cache_dir,
@@ -179,7 +181,7 @@ pub fn ensure_dirs(paths: &AppPaths) -> Result<(), String> {
         &paths.base_data_dir,
         &paths.app_config_dir,
         &paths.app_data_dir,
-        &paths.runtime_shared_dir,
+        &paths.app_runtime_dir,
         &paths.models_dir,
         &paths.manifest_cache_dir,
     ] {
@@ -190,7 +192,7 @@ pub fn ensure_dirs(paths: &AppPaths) -> Result<(), String> {
 }
 
 pub fn default_runtime_dir(paths: &AppPaths) -> PathBuf {
-    paths.runtime_shared_dir.clone()
+    paths.app_runtime_dir.clone()
 }
 
 pub fn runtime_dir_from_settings(settings: &AppSettings, paths: &AppPaths) -> PathBuf {
