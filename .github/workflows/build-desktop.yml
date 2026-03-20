@@ -35,7 +35,6 @@ on:
 jobs:
   build:
     name: Build (${{ matrix.platform_key }})
-    if: ${{ matrix.platform_key != 'ubuntu-x64' || inputs.include_ubuntu }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -48,10 +47,6 @@ jobs:
           - runner: macos-14
             target: aarch64-apple-darwin
             platform_key: macos-arm64
-            binary_name: pdf_markdown_studio
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            platform_key: ubuntu-x64
             binary_name: pdf_markdown_studio
 
     steps:
@@ -184,10 +179,82 @@ jobs:
           path: dist/pdf-markdown-studio-macos-arm64.dmg
           if-no-files-found: error
 
+  build_ubuntu:
+    if: ${{ inputs.include_ubuntu }}
+    name: Build (ubuntu-x64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install Linux dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libx11-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libgtk-3-dev \
+            libasound2-dev \
+            libudev-dev
+
+      - name: Build release
+        shell: pwsh
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+
+      - name: Validate runtime manifest mapping for platform
+        shell: pwsh
+        run: >
+          python scripts/ci_fetch_engine_runtime.py
+          --manifest runtime-manifests/engine-manifest.json
+          --platform ubuntu-x64
+          --check-only
+          --selection-out dist/runtime-selection-ubuntu-x64.json
+
+      - name: Build Ubuntu .deb package
+        shell: bash
+        run: |
+          python3 scripts/build_linux_deb.py \
+            --repo-root . \
+            --binary "target/x86_64-unknown-linux-gnu/release/pdf_markdown_studio" \
+            --output-dir dist
+
+      - name: Normalize Ubuntu .deb filename
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb_path="$(ls dist/*.deb | head -n 1)"
+          cp "$deb_path" "dist/pdf-markdown-studio-ubuntu-amd64.deb"
+
+      - name: Upload Ubuntu .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-markdown-studio-ubuntu-x64-deb
+          path: dist/pdf-markdown-studio-ubuntu-amd64.deb
+          if-no-files-found: error
+
   publish_release:
     name: Publish Release
-    if: ${{ inputs.create_release }}
-    needs: build
+    if: ${{ inputs.create_release && needs.build.result == 'success' && (needs.build_ubuntu.result == 'success' || needs.build_ubuntu.result == 'skipped') }}
+    needs:
+      - build
+      - build_ubuntu
     runs-on: ubuntu-latest
     permissions:
       contents: write
