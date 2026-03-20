@@ -251,7 +251,7 @@ jobs:
 
   publish_release:
     name: Publish Release
-    if: ${{ inputs.create_release && needs.build.result == 'success' && (needs.build_ubuntu.result == 'success' || needs.build_ubuntu.result == 'skipped') }}
+    if: ${{ always() && inputs.create_release == true && needs.build.result == 'success' && (needs.build_ubuntu.result == 'success' || needs.build_ubuntu.result == 'skipped') }}
     needs:
       - build
       - build_ubuntu
