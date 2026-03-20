@@ -26,10 +26,16 @@ on:
         required: true
         type: boolean
         default: false
+      include_ubuntu:
+        description: "Include Ubuntu .deb build in this release"
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   build:
     name: Build (${{ matrix.platform_key }})
+    if: ${{ matrix.platform_key != 'ubuntu-x64' || inputs.include_ubuntu }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -278,6 +284,7 @@ jobs:
           path: release-assets/macos
 
       - name: Download Ubuntu .deb artifact
+        if: ${{ inputs.include_ubuntu }}
         uses: actions/download-artifact@v4
         with:
           name: pdf-markdown-studio-ubuntu-x64-deb
@@ -287,7 +294,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ls -lah release-assets/windows release-assets/macos release-assets/linux
+          ls -lah release-assets/windows release-assets/macos
+          if [[ "${{ inputs.include_ubuntu }}" == "true" ]]; then
+            ls -lah release-assets/linux
+          fi
 
           TAG="${RELEASE_TAG}"
           REPO="${GITHUB_REPOSITORY}"
@@ -301,24 +311,35 @@ jobs:
           MAC_URL="https://github.com/${REPO}/releases/download/${TAG}/${MAC_FILE}"
           UBU_URL="https://github.com/${REPO}/releases/download/${TAG}/${UBU_FILE}"
           SUM_URL="https://github.com/${REPO}/releases/download/${TAG}/${SUM_FILE}"
+          ubuntu_download_line=""
+          ubuntu_install_section=""
 
-          sha256sum "release-assets/windows/${WIN_FILE}" | sed 's|release-assets/windows/||' > "${SUM_FILE}"
-          sha256sum "release-assets/macos/${MAC_FILE}" | sed 's|release-assets/macos/||' >> "${SUM_FILE}"
-          sha256sum "release-assets/linux/${UBU_FILE}" | sed 's|release-assets/linux/||' >> "${SUM_FILE}"
+          mkdir -p release-upload
+          cp "release-assets/windows/${WIN_FILE}" "release-upload/${WIN_FILE}"
+          cp "release-assets/macos/${MAC_FILE}" "release-upload/${MAC_FILE}"
+          sha256sum "release-upload/${WIN_FILE}" | sed 's|release-upload/||' > "${SUM_FILE}"
+          sha256sum "release-upload/${MAC_FILE}" | sed 's|release-upload/||' >> "${SUM_FILE}"
+          if [[ "${{ inputs.include_ubuntu }}" == "true" ]]; then
+            cp "release-assets/linux/${UBU_FILE}" "release-upload/${UBU_FILE}"
+            sha256sum "release-upload/${UBU_FILE}" | sed 's|release-upload/||' >> "${SUM_FILE}"
+            ubuntu_download_line="- Ubuntu x64 (.deb): [${UBU_FILE}](${UBU_URL})"
+            ubuntu_install_section="$(cat <<EOF
+          ## Quick Install (Ubuntu)
+
+          \`\`\`bash
+          curl -L "${UBU_URL}" -o /tmp/${UBU_FILE} && sudo apt install -y /tmp/${UBU_FILE}
+          \`\`\`
+          EOF
+            )"
+          fi
 
           cat > release-notes.md <<EOF
           ## Downloads
 
           - Windows x64*: [pdf-markdown-studio-windows-x64](${WIN_URL})
           - macOS arm64: [${MAC_FILE}](${MAC_URL})
-          - Ubuntu x64 (.deb): [${UBU_FILE}](${UBU_URL})
+          ${ubuntu_download_line}
           - Checksums: [${SUM_FILE}](${SUM_URL})
-
-          ## Quick Install (Ubuntu)
-
-          \`\`\`bash
-          curl -L "${UBU_URL}" -o /tmp/${UBU_FILE} && sudo apt install -y /tmp/${UBU_FILE}
-          \`\`\`
 
           ## Unsigned Build Notice
 
@@ -347,6 +368,8 @@ jobs:
           - If blocked by Gatekeeper, use System Settings -> Privacy & Security -> Open Anyway when available and policy permits.
           - In the app, after runtime install/repair, click Unblock unsigned runtime then Recheck.
           - The macOS unblock script removes quarantine attributes recursively (xattr -dr com.apple.quarantine) and restores executable bits for runtime binaries/scripts where needed (chmod +x on relevant files).
+          
+          ${ubuntu_install_section}
           EOF
 
       - name: Publish GitHub release assets
@@ -360,7 +383,5 @@ jobs:
           body_path: release-notes.md
           generate_release_notes: false
           files: |
-            release-assets/windows/pdf-markdown-studio-windows-x64.exe
-            release-assets/macos/pdf-markdown-studio-macos-arm64.dmg
-            release-assets/linux/pdf-markdown-studio-ubuntu-amd64.deb
+            release-upload/*
             SHA256SUMS.txt
