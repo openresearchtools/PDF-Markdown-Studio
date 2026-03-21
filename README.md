@@ -1,8 +1,8 @@
 # PDF Markdown Studio
 
 ![PDF Markdown Studio Demo](Demo.png)
-- Windows x64*: [pdf-markdown-studio-windows-x64](https://github.com/openresearchtools/PDF-Markdown-Studio/releases/download/1.0/pdf-markdown-studio-windows-x64.exe)
-- macOS arm64: [pdf-markdown-studio-macos-arm64.dmg](https://github.com/openresearchtools/PDF-Markdown-Studio/releases/download/1.0/pdf-markdown-studio-macos-arm64.dmg)
+- Windows x64*: [PDF Markdown Studio.exe](https://github.com/openresearchtools/PDF-Markdown-Studio/releases/download/1.0/pdf-markdown-studio-windows-x64.exe)
+- macOS arm64: [PDF Markdown Studio.dmg](https://github.com/openresearchtools/PDF-Markdown-Studio/releases/download/1.0/pdf-markdown-studio-macos-arm64.dmg)
 
 PDF Markdown Studio is a desktop app for converting PDFs and images into clean Markdown.
 
