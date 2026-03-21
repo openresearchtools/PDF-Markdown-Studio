@@ -390,17 +390,17 @@ jobs:
             cp "release-assets/linux/${UBU_FILE}" "release-upload/${UBU_FILE}"
             sha256sum "release-upload/${UBU_FILE}" | sed 's|release-upload/||' >> "${SUM_FILE}"
             ubuntu_download_line="- Ubuntu x64 (.deb): [${UBU_FILE}](${UBU_URL})"
-            ubuntu_install_section="$(cat <<EOF
+            ubuntu_install_section="$(cat <<UBUNTU_INSTALL_SECTION
           ## Quick Install (Ubuntu)
 
           \`\`\`bash
           curl -L "${UBU_URL}" -o /tmp/${UBU_FILE} && sudo apt install -y /tmp/${UBU_FILE}
           \`\`\`
-          EOF
+          UBUNTU_INSTALL_SECTION
             )"
           fi
 
-          cat > release-notes.md <<EOF
+          cat > release-notes.md <<RELEASE_NOTES
           ## Downloads
 
           - Windows x64*: [pdf-markdown-studio-windows-x64](${WIN_URL})
@@ -437,7 +437,7 @@ jobs:
           - The macOS unblock script removes quarantine attributes recursively (xattr -dr com.apple.quarantine) and restores executable bits for runtime binaries/scripts where needed (chmod +x on relevant files).
           
           ${ubuntu_install_section}
-          EOF
+          RELEASE_NOTES
 
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
