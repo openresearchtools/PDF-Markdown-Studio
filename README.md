@@ -168,7 +168,8 @@ This app uses [OpenResearchTools Engine](https://github.com/openresearchtools/en
   PDF rasterization/page access primitives used by the app's native PDF rendering and by Engine PDF conversion paths.
 ## Current VLM Model Lineup
 
-PDF Markdown Studio now uses the `Qwen3.5` GGUF + MMProj model family for PDF VLM and Image VLM conversion:
+PDF Markdown Studio now uses the `Qwen3.5` GGUF + MMProj model family  [`Qwen`](https://huggingface.co/Qwen):
+  upstream Qwen3.5 model family reference used for the app's current vision model lineup for PDF VLM and Image VLM conversion:
 
 - `Qwen3.5 9B` (`Q4_K_M` and `Q8_0`)
 - `Qwen3.5 4B` (`Q4_K_M` and `Q8_0`)
@@ -176,12 +177,15 @@ PDF Markdown Studio now uses the `Qwen3.5` GGUF + MMProj model family for PDF VL
 
 The app downloads the text model and the matching MMProj for the selected family automatically into the shared OpenResearchTools model store.
 
+Note the use of the models in our app does **not** imply affiliations or endorsements from original model authors. This is just a personal recommendation after testing many currently available models for speed/quality of the outputs. You are also free to use any other vision model that can run on GGML (llama.cpp backend). The app allows for manual model selection.
+
+
 Recommended guidance:
 
 - **9B 4-bit is the recommended default** for documents that need higher precision, denser layout understanding, or more reliable structure recovery.
 - **2B models often still produce surprisingly strong results** at a fraction of the compute cost, and are a good option when you want speed or need to run on lighter hardware.
 - `4B` is the middle ground when you want a better quality/speed balance.
--
+
  [`openresearchtools/Qwen3.5-9B-GGUF`](https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF),
   [`openresearchtools/Qwen3.5-4B-GGUF`](https://huggingface.co/openresearchtools/Qwen3.5-4B-GGUF), and
   [`openresearchtools/Qwen3.5-2B-GGUF`](https://huggingface.co/openresearchtools/Qwen3.5-2B-GGUF):
