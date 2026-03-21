@@ -154,6 +154,10 @@ ${icon_plist_block}
 </plist>
 EOF
 
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --deep --sign - "$app_bundle" >/dev/null 2>&1 || true
+fi
+
 cp -R "$app_bundle" "$dmg_root/"
 ln -s /Applications "$dmg_root/Applications"
 
