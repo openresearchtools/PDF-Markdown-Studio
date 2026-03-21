@@ -21,7 +21,7 @@ The PDF Markdown Studio application source code is licensed under the MIT Licens
 ## Supported Files
 
 - PDF (`.pdf`)
-- Images (`.png`, `.jpg`, `.jpeg`, `.bmp`, `.gif`, `.webp`, `.tif`, `.tiff`)
+- Images (`.png`, `.jpg`, `.jpeg`)
 
 ## Conversion Modes (How To Choose)
 
