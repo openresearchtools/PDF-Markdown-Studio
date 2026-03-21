@@ -39,6 +39,8 @@ Use this when layout is complex, scanned-like, visual-heavy, or FAST output is p
 - Uses your selected VLM model + MMProj.
 - Works for both PDFs and images.
 - Slower than FAST, but better for difficult pages.
+- Engine applies a per-page quality gate for PDF VLM output. Pages that end up obviously truncated, stuck in repetition/looping, or otherwise fail the gate are retried automatically before final output is written.
+- This is meant to reduce bad outputs on difficult pages, but manual inspection is still recommended for important documents.
 - Limitation: table quality depends on the selected model's capabilities.
 - On complex tables with heavy formatting/whitespace, models can misattribute values to wrong cells or rows.
 - If downstream automation depends on table values, compare Markdown against the original document before automated extraction.
@@ -73,17 +75,26 @@ Output files are written next to the source document:
 
 ## Runtime and Model Location
 
-Default runtime path:
+Default Engine runtime path:
 
-- `C:\Users\<user>\AppData\Roaming\OpenResearchTools\engine`
+- Windows: `C:\Users\<user>\AppData\Roaming\OpenResearchTools\PDF Markdown Studio\Engine`
+- macOS: `~/Library/Application Support/OpenResearchTools/PDF Markdown Studio/Engine`
+- Linux: `~/.local/share/OpenResearchTools/PDF Markdown Studio/Engine`
 
 Default app settings/data path:
 
-- `C:\Users\<user>\AppData\Roaming\OpenResearchTools\PDF Markdown Studio`
+- Windows config/data: `C:\Users\<user>\AppData\Roaming\OpenResearchTools\PDF Markdown Studio`
+- macOS config/data: `~/Library/Application Support/OpenResearchTools/PDF Markdown Studio`
+- Linux config: `~/.config/OpenResearchTools/PDF Markdown Studio`
+- Linux data: `~/.local/share/OpenResearchTools/PDF Markdown Studio`
 
-Default vision model folder:
+Shared VLM model folder:
 
-- `C:\Users\<user>\AppData\Roaming\OpenResearchTools\Models\Vision`
+- Windows: `C:\Users\<user>\AppData\Roaming\OpenResearchTools\models`
+- macOS: `~/Library/Application Support/OpenResearchTools/models`
+- Linux: `~/.local/share/OpenResearchTools/models`
+
+Each selected Qwen3.5 family downloads into its own shared repo folder under that global `models` root, including the required MMProj file for the chosen family.
 
 ## GPU / CPU Execution
 
@@ -129,21 +140,21 @@ If your environment blocks unsigned binaries, the recommended path is:
   (`xattr -dr com.apple.quarantine`) and restores executable bits for runtime
   binaries/scripts where needed (`chmod +x` on relevant files).
 
-##If conversion fails or setup is incomplete:
+## If conversion fails or setup is incomplete
 
 1. Open `Settings`.
 2. Use runtime health/check and download/repair actions.
 3. Confirm model and MMProj paths exist.
 4. Check `Jobs and logs` for the exact error.
 
-##If adding many files feels slow:
+## If adding many files feels slow
 
 - Wait for background imports to finish before converting.
 - Large PDFs can take time to rasterize and preview.
 
 ## Acknowledgements (What This App Uses)
 
-This app uses OpenResearchTools Engine runtime components for PDF and VLM execution `https://github.com/openresearchtools/engine`. For this app's active feature set, key upstream technologies include:
+This app uses [OpenResearchTools Engine](https://github.com/openresearchtools/engine) runtime components for PDF and VLM execution. For this app's active feature set, key upstream technologies include:
 
 - [`Openresearchtools-Engine`](https://github.com/openresearchtools/engine):
   embeddable runtime used by this app (`llama-server-bridge`, runtime orchestration, and model/device execution path).
@@ -155,8 +166,28 @@ This app uses OpenResearchTools Engine runtime components for PDF and VLM execut
   reference logic for VLM document-conversion behavior used by Engine `pdfvlm`, including page-wise rendering/scaling heuristics (`scale`, `oversample`) and Catmull-Rom style downscale before inference.
 - [`PDFium`](https://pdfium.googlesource.com/pdfium/) and [`pdfium-render`](https://github.com/ajrcarey/pdfium-render):
   PDF rasterization/page access primitives used by the app's native PDF rendering and by Engine PDF conversion paths.
-- [`Qwen`](https://huggingface.co/Qwen) / [`Qwen3-VL GGUF`](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF):
-  VLM model family used for image and PDF-VLM markdown conversion when configured by the user.
+## Current VLM Model Lineup
+
+PDF Markdown Studio now uses the `Qwen3.5` GGUF + MMProj model family for PDF VLM and Image VLM conversion:
+
+- `Qwen3.5 9B` (`Q4_K_M` and `Q8_0`)
+- `Qwen3.5 4B` (`Q4_K_M` and `Q8_0`)
+- `Qwen3.5 2B` (`Q4_K_M` and `Q8_0`)
+
+The app downloads the text model and the matching MMProj for the selected family automatically into the shared OpenResearchTools model store.
+
+Recommended guidance:
+
+- **9B 4-bit is the recommended default** for documents that need higher precision, denser layout understanding, or more reliable structure recovery.
+- **2B models often still produce surprisingly strong results** at a fraction of the compute cost, and are a good option when you want speed or need to run on lighter hardware.
+- `4B` is the middle ground when you want a better quality/speed balance.
+-
+ [`openresearchtools/Qwen3.5-9B-GGUF`](https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF),
+  [`openresearchtools/Qwen3.5-4B-GGUF`](https://huggingface.co/openresearchtools/Qwen3.5-4B-GGUF), and
+  [`openresearchtools/Qwen3.5-2B-GGUF`](https://huggingface.co/openresearchtools/Qwen3.5-2B-GGUF):
+  converted GGUF + MMProj model repositories used by the app for PDF VLM and Image VLM conversion.
+- [`Qwen`](https://huggingface.co/Qwen):
+  upstream Qwen3.5 model family reference used for the app's current vision model lineup.
 
 This project is independent and is **not affiliated with, sponsored by, or endorsed by** `egui`, `llama.cpp`, `Docling`, `PDFium`, `Qwen`, or other upstream projects/vendors.
 
@@ -182,4 +213,3 @@ BibTeX:
   license   = {MIT}
 }
 ```
-
