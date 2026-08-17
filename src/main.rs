@@ -8,6 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -21,6 +22,8 @@ use eframe::egui::{FontData, FontDefinitions};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use pdfium_render::prelude::*;
 
+#[cfg(target_os = "linux")]
+use app_config::linux_runtime_dir_for_backend;
 use app_config::{
     AppPaths, AppSettings, ConversionMode, DEFAULT_IMAGE_VLM_PROMPT, DEFAULT_VLM_PROMPT, app_paths,
     default_runtime_dir, ensure_dirs, load_settings, runtime_dir_from_settings, save_settings,
@@ -174,6 +177,9 @@ const PDF_ZOOM_STEP: f32 = 0.10;
 const PAGE_ACTIVE_VISIBILITY_THRESHOLD: f32 = 0.80;
 const MAX_BACKGROUND_EVENTS_PER_FRAME: usize = 32;
 const MAX_DOCUMENT_MATERIALIZATIONS_PER_FRAME: usize = 1;
+const MAX_PDF_PAGE_TEXTURES_PER_DOCUMENT: usize = 8;
+const PDF_PREVIEW_RENDER_WIDTH: i32 = 1200;
+const PDF_PREVIEW_RENDER_MAX_HEIGHT: i32 = 1800;
 const BACKGROUND_REPAINT_MS: u64 = 100;
 #[cfg(target_os = "linux")]
 const CONVERSION_ONLY_REPAINT_MS_LINUX: u64 = 750;
@@ -191,6 +197,18 @@ const BUNDLED_UNBLOCK_UNSIGNED_RUNTIME_SH: &str =
 const APP_ICON_PNG_BYTES: &[u8] = include_bytes!("../logo/windows/app_icon.png");
 
 fn main() -> eframe::Result<()> {
+    let mut open_file_picker = false;
+    let initial_files = std::env::args_os()
+        .skip(1)
+        .filter_map(|argument| {
+            if argument == "--pick-documents" {
+                open_file_picker = true;
+                None
+            } else {
+                Some(PathBuf::from(argument))
+            }
+        })
+        .collect::<Vec<_>>();
     let viewport = with_app_icon(
         egui::ViewportBuilder::default()
             .with_title("PDF Markdown Studio")
@@ -208,7 +226,13 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "PDF Markdown Studio",
         options,
-        Box::new(|cc| Ok(Box::new(PdfMarkdownApp::new(cc)))),
+        Box::new(move |cc| {
+            Ok(Box::new(PdfMarkdownApp::new(
+                cc,
+                initial_files.clone(),
+                open_file_picker,
+            )))
+        }),
     )
 }
 
@@ -236,6 +260,7 @@ struct PaneMetrics {
     user_scrolled: bool,
     scroll_offset_y: f32,
     first_visible_page: Option<usize>,
+    visible_pages: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -330,6 +355,13 @@ enum ModelDownloadPurpose {
     Mmproj,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum FilePickerPurpose {
+    AddDocuments,
+    VlmModel,
+    MmprojModel,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LegalDocKind {
     ThirdPartyNotices,
@@ -413,7 +445,7 @@ struct LoadedRaster {
 
 #[derive(Clone, Debug)]
 struct LoadedPdfPagePayload {
-    raster: LoadedRaster,
+    preview_size: Vec2,
     text: String,
 }
 
@@ -451,6 +483,7 @@ enum BackgroundEvent {
     },
     DevicesEnumerated {
         job_id: u64,
+        runtime_dir: PathBuf,
         result: Result<Vec<EngineDevice>, String>,
     },
     ModelDownloaded {
@@ -462,6 +495,14 @@ enum BackgroundEvent {
         job_id: u64,
         result: Result<LoadedDocumentPayload, String>,
     },
+    PdfPagesRendered {
+        doc_id: usize,
+        results: Vec<(usize, Result<LoadedRaster, String>)>,
+    },
+    FilePickerFinished {
+        purpose: FilePickerPurpose,
+        paths: Vec<PathBuf>,
+    },
     ConversionFinished {
         job_id: u64,
         doc_id: usize,
@@ -472,9 +513,18 @@ enum BackgroundEvent {
 }
 
 struct PdfPageData {
-    texture: egui::TextureHandle,
+    texture: Option<egui::TextureHandle>,
     image_size: Vec2,
     text: String,
+    render_state: PdfPageRenderState,
+}
+
+#[derive(Clone, Debug)]
+enum PdfPageRenderState {
+    NotRequested,
+    Queued,
+    Ready,
+    Failed(String),
 }
 
 struct PdfDocumentData {
@@ -598,11 +648,19 @@ struct PdfMarkdownApp {
 
     background_tx: Sender<BackgroundEvent>,
     background_rx: Receiver<BackgroundEvent>,
+    egui_ctx: egui::Context,
     pending_document_load_results: VecDeque<(u64, Result<LoadedDocumentPayload, String>)>,
+    file_picker_in_progress: bool,
+    #[cfg(target_os = "linux")]
+    linux_file_dialog: rfd::AsyncFileDialog,
 }
 
 impl PdfMarkdownApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        initial_files: Vec<PathBuf>,
+        open_file_picker: bool,
+    ) -> Self {
         apply_modern_theme(&cc.egui_ctx);
 
         let (background_tx, background_rx) = mpsc::channel();
@@ -633,6 +691,17 @@ impl PdfMarkdownApp {
             || !configured_path_exists(&settings.vlm_model_path)
             || !configured_path_exists(&settings.vlm_mmproj_path);
 
+        #[cfg(target_os = "linux")]
+        let (runtime_manifest, runtime_assets, runtime_status) = (
+            None,
+            Vec::new(),
+            format!(
+                "Using the installed {} Engine package at {}.",
+                settings.runtime_download_backend.to_ascii_uppercase(),
+                runtime_dir.display()
+            ),
+        );
+        #[cfg(not(target_os = "linux"))]
         let (runtime_manifest, runtime_assets, runtime_status) = match load_engine_manifest(&paths)
         {
             Ok(manifest) => {
@@ -728,7 +797,11 @@ impl PdfMarkdownApp {
             runtime_status,
             background_tx,
             background_rx,
+            egui_ctx: cc.egui_ctx.clone(),
             pending_document_load_results: VecDeque::new(),
+            file_picker_in_progress: false,
+            #[cfg(target_os = "linux")]
+            linux_file_dialog: rfd::AsyncFileDialog::new().set_parent(cc),
         };
 
         app.sync_runtime_backend_from_installed_runtime();
@@ -739,6 +812,14 @@ impl PdfMarkdownApp {
             } else {
                 app.ensure_devices_enumerated_for_runtime();
             }
+        }
+
+        if !initial_files.is_empty() {
+            app.add_files(initial_files);
+        }
+        #[cfg(target_os = "linux")]
+        if open_file_picker {
+            app.start_linux_file_picker(FilePickerPurpose::AddDocuments);
         }
 
         app
@@ -950,7 +1031,7 @@ impl PdfMarkdownApp {
         if cfg!(target_os = "macos") {
             return vec!["metal".to_owned()];
         }
-        vec!["vulkan".to_owned()]
+        vec!["vulkan".to_owned(), "cuda".to_owned()]
     }
 
     fn runtime_backend_options_from_assets(assets: &[ManifestAsset]) -> Vec<String> {
@@ -1105,7 +1186,10 @@ impl PdfMarkdownApp {
             if let Some(gpu_index) = Self::preferred_gpu_option_index(options) {
                 return gpu_index;
             }
-            return cpu_index;
+            return options
+                .iter()
+                .position(|option| option.is_gpu)
+                .unwrap_or(cpu_index);
         }
 
         #[cfg(target_os = "macos")]
@@ -1233,6 +1317,10 @@ impl PdfMarkdownApp {
     }
 
     fn reset_device_enumeration_cache(&mut self) {
+        // A backend switch must be allowed to start a fresh subprocess probe even
+        // when the previous backend's probe has not returned yet. Stale results
+        // are rejected by their runtime path in process_background_events().
+        self.device_enumeration_in_progress = false;
         self.available_devices.clear();
         self.last_enumerated_runtime_dir = None;
         self.rebuild_device_options_from_available();
@@ -1536,6 +1624,7 @@ impl PdfMarkdownApp {
         }
 
         let tx = self.background_tx.clone();
+        let egui_ctx = self.egui_ctx.clone();
         thread::spawn(move || {
             let progress_tx = tx.clone();
             let result = Self::run_conversion_task(&task, |status| {
@@ -1551,6 +1640,7 @@ impl PdfMarkdownApp {
                 requested_mode: task.mode,
                 result,
             });
+            egui_ctx.request_repaint();
         });
     }
 
@@ -1638,6 +1728,20 @@ impl PdfMarkdownApp {
                 mode,
                 ConversionMode::PdfVlm | ConversionMode::FastPdfWithVlmFallback
             );
+        if needs_vlm
+            && (self.device_enumeration_in_progress
+                || self
+                    .last_enumerated_runtime_dir
+                    .as_ref()
+                    .is_none_or(|last| last != &self.effective_runtime_dir()))
+        {
+            let message =
+                "Engine device enumeration is still running for the selected backend. Wait for it to finish, then start conversion."
+                    .to_owned();
+            self.status_message = message.clone();
+            self.push_log(LogLevel::Warn, message.clone());
+            return Err(message);
+        }
         if needs_vlm && !self.vlm_stack_ready() {
             let message = if doc_is_pdf {
                 "VLM model and MMProj are required for PDF VLM / FAST fallback mode. Open settings and download/set both model files."
@@ -1765,52 +1869,66 @@ impl PdfMarkdownApp {
     }
 
     fn reload_runtime_manifest(&mut self) {
-        match load_engine_manifest(&self.paths) {
-            Ok(manifest) => {
-                self.runtime_assets = filtered_assets_for_platform(&manifest);
-                self.runtime_install_backends =
-                    Self::runtime_backend_options_from_assets(&self.runtime_assets);
-                self.selected_runtime_install_backend = Self::resolve_runtime_backend_index(
-                    &self.runtime_install_backends,
-                    &self.settings.runtime_download_backend,
-                )
-                .min(self.runtime_install_backends.len().saturating_sub(1));
-                if let Some(backend) = self
-                    .runtime_install_backends
-                    .get(self.selected_runtime_install_backend)
-                {
-                    self.settings.runtime_download_backend = backend.clone();
-                }
-                let tag = if manifest.tag.trim().is_empty() {
-                    "latest".to_owned()
-                } else {
-                    manifest.tag.clone()
-                };
-                self.runtime_manifest = Some(manifest);
-                self.runtime_status = format!("Runtime manifest loaded ({tag}).");
-            }
-            Err(err) => {
-                self.runtime_manifest = None;
-                self.runtime_assets.clear();
-                self.runtime_install_backends = Self::default_runtime_backends_for_platform();
-                self.selected_runtime_install_backend = Self::resolve_runtime_backend_index(
-                    &self.runtime_install_backends,
-                    &self.settings.runtime_download_backend,
-                )
-                .min(self.runtime_install_backends.len().saturating_sub(1));
-                if let Some(backend) = self
-                    .runtime_install_backends
-                    .get(self.selected_runtime_install_backend)
-                {
-                    self.settings.runtime_download_backend = backend.clone();
-                }
-                self.runtime_status = format!("Failed to load runtime manifest: {err}");
-            }
+        #[cfg(target_os = "linux")]
+        {
+            self.refresh_runtime_state();
+            self.runtime_status = format!(
+                "Using the installed {} Engine package at {}.",
+                self.settings.runtime_download_backend.to_ascii_uppercase(),
+                self.effective_runtime_dir().display()
+            );
+            return;
         }
-        if self.selected_runtime_asset >= self.runtime_assets.len() {
-            self.selected_runtime_asset = 0;
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            match load_engine_manifest(&self.paths) {
+                Ok(manifest) => {
+                    self.runtime_assets = filtered_assets_for_platform(&manifest);
+                    self.runtime_install_backends =
+                        Self::runtime_backend_options_from_assets(&self.runtime_assets);
+                    self.selected_runtime_install_backend = Self::resolve_runtime_backend_index(
+                        &self.runtime_install_backends,
+                        &self.settings.runtime_download_backend,
+                    )
+                    .min(self.runtime_install_backends.len().saturating_sub(1));
+                    if let Some(backend) = self
+                        .runtime_install_backends
+                        .get(self.selected_runtime_install_backend)
+                    {
+                        self.settings.runtime_download_backend = backend.clone();
+                    }
+                    let tag = if manifest.tag.trim().is_empty() {
+                        "latest".to_owned()
+                    } else {
+                        manifest.tag.clone()
+                    };
+                    self.runtime_manifest = Some(manifest);
+                    self.runtime_status = format!("Runtime manifest loaded ({tag}).");
+                }
+                Err(err) => {
+                    self.runtime_manifest = None;
+                    self.runtime_assets.clear();
+                    self.runtime_install_backends = Self::default_runtime_backends_for_platform();
+                    self.selected_runtime_install_backend = Self::resolve_runtime_backend_index(
+                        &self.runtime_install_backends,
+                        &self.settings.runtime_download_backend,
+                    )
+                    .min(self.runtime_install_backends.len().saturating_sub(1));
+                    if let Some(backend) = self
+                        .runtime_install_backends
+                        .get(self.selected_runtime_install_backend)
+                    {
+                        self.settings.runtime_download_backend = backend.clone();
+                    }
+                    self.runtime_status = format!("Failed to load runtime manifest: {err}");
+                }
+            }
+            if self.selected_runtime_asset >= self.runtime_assets.len() {
+                self.selected_runtime_asset = 0;
+            }
+            self.sync_runtime_backend_from_installed_runtime();
         }
-        self.sync_runtime_backend_from_installed_runtime();
     }
 
     fn process_background_events(&mut self, ctx: &egui::Context) {
@@ -1902,12 +2020,54 @@ impl PdfMarkdownApp {
                         }
                     }
                 }
-                BackgroundEvent::DevicesEnumerated { job_id, result } => {
+                BackgroundEvent::DevicesEnumerated {
+                    job_id,
+                    runtime_dir,
+                    result,
+                } => {
+                    let selected_runtime_dir = self.effective_runtime_dir();
+                    let result_is_current = selected_runtime_dir == runtime_dir
+                        && self
+                            .last_enumerated_runtime_dir
+                            .as_ref()
+                            .is_some_and(|last| last == &runtime_dir);
+                    if !result_is_current {
+                        self.update_job_state(
+                            job_id,
+                            JobState::Failed,
+                            format!(
+                                "Ignored stale device enumeration for {} after backend changed to {}",
+                                runtime_dir.display(),
+                                selected_runtime_dir.display()
+                            ),
+                            None,
+                        );
+                        self.push_log(
+                            LogLevel::Info,
+                            format!(
+                                "Ignored stale device enumeration from '{}'.",
+                                runtime_dir.display()
+                            ),
+                        );
+                        continue;
+                    }
+
                     self.device_enumeration_in_progress = false;
                     match result {
                         Ok(devices) => {
                             self.available_devices = devices;
                             self.rebuild_device_options_from_available();
+                            // GPU indices are backend-local. For example, the same
+                            // NVIDIA card is Vulkan index 1 but CUDA index 0. Keep
+                            // GPU intent while normalizing the stored index to the
+                            // selected runtime's freshly enumerated device list.
+                            self.apply_selected_device_to_settings();
+                            if let Err(err) = self.save_settings_now() {
+                                self.push_log(
+                                    LogLevel::Error,
+                                    format!("Failed to save normalized device selection: {err}"),
+                                );
+                            }
                             self.runtime_status = format!(
                                 "Enumerated {} runtime device(s); {} execution option(s) available.",
                                 self.available_devices.len(),
@@ -2030,6 +2190,24 @@ impl PdfMarkdownApp {
                 BackgroundEvent::DocumentLoaded { job_id, result } => {
                     self.pending_document_load_results
                         .push_back((job_id, result));
+                }
+                BackgroundEvent::PdfPagesRendered { doc_id, results } => {
+                    self.install_pdf_page_renders(ctx, doc_id, results);
+                }
+                BackgroundEvent::FilePickerFinished { purpose, paths } => {
+                    self.file_picker_in_progress = false;
+                    if paths.is_empty() {
+                        self.status_message = "File selection cancelled.".to_owned();
+                    } else {
+                        match purpose {
+                            FilePickerPurpose::AddDocuments => self.add_files(paths),
+                            FilePickerPurpose::VlmModel | FilePickerPurpose::MmprojModel => {
+                                if let Some(path) = paths.into_iter().next() {
+                                    self.apply_picked_model_path(purpose, path);
+                                }
+                            }
+                        }
+                    }
                 }
                 BackgroundEvent::ConversionFinished {
                     job_id,
@@ -2197,101 +2375,113 @@ impl PdfMarkdownApp {
     }
 
     fn start_runtime_download(&mut self) {
-        if self.runtime_maintenance_in_progress() {
+        #[cfg(target_os = "linux")]
+        {
+            self.runtime_status = "Engine runtimes are managed by APT on Linux. Install or repair both packages with: sudo apt install --reinstall openresearchtools-engine openresearchtools-engine-cuda".to_owned();
+            self.status_message = self.runtime_status.clone();
+            self.push_log(LogLevel::Info, self.runtime_status.clone());
             return;
         }
-        if self.runtime_assets.is_empty() {
-            self.reload_runtime_manifest();
-            if self.runtime_assets.is_empty() {
-                self.runtime_status = "No runtime assets available for this platform.".to_owned();
-                self.push_log(LogLevel::Warn, self.runtime_status.clone());
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            if self.runtime_maintenance_in_progress() {
                 return;
             }
-        }
-
-        let selected_backend = self
-            .runtime_install_backends
-            .get(
-                self.selected_runtime_install_backend
-                    .min(self.runtime_install_backends.len().saturating_sub(1)),
-            )
-            .cloned()
-            .unwrap_or_default();
-
-        #[cfg(target_os = "windows")]
-        let asset = if selected_backend.trim().is_empty() {
-            let index = self
-                .selected_runtime_asset
-                .min(self.runtime_assets.len().saturating_sub(1));
-            self.runtime_assets[index].clone()
-        } else if let Some(found) = self.runtime_assets.iter().find(|asset| {
-            asset
-                .backend
-                .trim()
-                .eq_ignore_ascii_case(selected_backend.trim())
-        }) {
-            found.clone()
-        } else {
-            let available = self
-                .runtime_assets
-                .iter()
-                .map(|asset| asset.backend.trim().to_ascii_lowercase())
-                .filter(|value| !value.is_empty())
-                .collect::<Vec<_>>()
-                .join(", ");
-            self.runtime_status = format!(
-                "Selected runtime backend '{}' is not available in manifest for this platform (available: {}).",
-                selected_backend,
-                if available.trim().is_empty() {
-                    "<none>"
-                } else {
-                    &available
+            if self.runtime_assets.is_empty() {
+                self.reload_runtime_manifest();
+                if self.runtime_assets.is_empty() {
+                    self.runtime_status =
+                        "No runtime assets available for this platform.".to_owned();
+                    self.push_log(LogLevel::Warn, self.runtime_status.clone());
+                    return;
                 }
+            }
+
+            let selected_backend = self
+                .runtime_install_backends
+                .get(
+                    self.selected_runtime_install_backend
+                        .min(self.runtime_install_backends.len().saturating_sub(1)),
+                )
+                .cloned()
+                .unwrap_or_default();
+
+            #[cfg(target_os = "windows")]
+            let asset = if selected_backend.trim().is_empty() {
+                let index = self
+                    .selected_runtime_asset
+                    .min(self.runtime_assets.len().saturating_sub(1));
+                self.runtime_assets[index].clone()
+            } else if let Some(found) = self.runtime_assets.iter().find(|asset| {
+                asset
+                    .backend
+                    .trim()
+                    .eq_ignore_ascii_case(selected_backend.trim())
+            }) {
+                found.clone()
+            } else {
+                let available = self
+                    .runtime_assets
+                    .iter()
+                    .map(|asset| asset.backend.trim().to_ascii_lowercase())
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.runtime_status = format!(
+                    "Selected runtime backend '{}' is not available in manifest for this platform (available: {}).",
+                    selected_backend,
+                    if available.trim().is_empty() {
+                        "<none>"
+                    } else {
+                        &available
+                    }
+                );
+                self.push_log(LogLevel::Warn, self.runtime_status.clone());
+                return;
+            };
+
+            #[cfg(not(target_os = "windows"))]
+            let asset = {
+                let index = self
+                    .selected_runtime_asset
+                    .min(self.runtime_assets.len().saturating_sub(1));
+                self.runtime_assets[index].clone()
+            };
+            let runtime_dir = self.effective_runtime_dir();
+            let tx = self.background_tx.clone();
+            let mode_name = if asset.id.trim().is_empty() {
+                asset.file_name.clone()
+            } else {
+                asset.id.clone()
+            };
+            let job_id = self.create_job(
+                JobKind::RuntimeInstall,
+                format!("Install runtime ({mode_name})"),
+                JobState::Running,
+                "Preparing runtime installation...",
             );
-            self.push_log(LogLevel::Warn, self.runtime_status.clone());
-            return;
-        };
 
-        #[cfg(not(target_os = "windows"))]
-        let asset = {
-            let index = self
-                .selected_runtime_asset
-                .min(self.runtime_assets.len().saturating_sub(1));
-            self.runtime_assets[index].clone()
-        };
-        let runtime_dir = self.effective_runtime_dir();
-        let tx = self.background_tx.clone();
-        let mode_name = if asset.id.trim().is_empty() {
-            asset.file_name.clone()
-        } else {
-            asset.id.clone()
-        };
-        let job_id = self.create_job(
-            JobKind::RuntimeInstall,
-            format!("Install runtime ({mode_name})"),
-            JobState::Running,
-            "Preparing runtime installation...",
-        );
+            self.runtime_download_in_progress = true;
+            self.runtime_post_install_prompt = false;
+            self.runtime_status = if selected_backend.trim().is_empty() {
+                format!("Starting runtime installation: {}", mode_name)
+            } else {
+                format!(
+                    "Starting runtime installation (backend: {}): {}",
+                    selected_backend.to_ascii_uppercase(),
+                    mode_name
+                )
+            };
+            self.push_log(LogLevel::Info, self.runtime_status.clone());
 
-        self.runtime_download_in_progress = true;
-        self.runtime_post_install_prompt = false;
-        self.runtime_status = if selected_backend.trim().is_empty() {
-            format!("Starting runtime installation: {}", mode_name)
-        } else {
-            format!(
-                "Starting runtime installation (backend: {}): {}",
-                selected_backend.to_ascii_uppercase(),
-                mode_name
-            )
-        };
-        self.push_log(LogLevel::Info, self.runtime_status.clone());
-
-        thread::spawn(move || {
-            let result = install_runtime_asset(&asset, &runtime_dir, |status| {
-                let _ = tx.send(BackgroundEvent::JobProgress { job_id, status });
+            thread::spawn(move || {
+                let result = install_runtime_asset(&asset, &runtime_dir, |status| {
+                    let _ = tx.send(BackgroundEvent::JobProgress { job_id, status });
+                });
+                let _ = tx.send(BackgroundEvent::RuntimeInstalled { job_id, result });
             });
-            let _ = tx.send(BackgroundEvent::RuntimeInstalled { job_id, result });
-        });
+        }
     }
 
     fn runtime_maintenance_in_progress(&self) -> bool {
@@ -2359,7 +2549,11 @@ impl PdfMarkdownApp {
 
         thread::spawn(move || {
             let result = list_bridge_devices(&runtime_dir);
-            let _ = tx.send(BackgroundEvent::DevicesEnumerated { job_id, result });
+            let _ = tx.send(BackgroundEvent::DevicesEnumerated {
+                job_id,
+                runtime_dir,
+                result,
+            });
         });
     }
 
@@ -2398,6 +2592,7 @@ impl PdfMarkdownApp {
         self.push_log(LogLevel::Info, self.runtime_status.clone());
 
         let tx = self.background_tx.clone();
+        let egui_ctx = self.egui_ctx.clone();
         thread::spawn(move || {
             let result = runtime_manager::download_model_to_file(&url, &destination, |status| {
                 let _ = tx.send(BackgroundEvent::JobProgress { job_id, status });
@@ -2408,6 +2603,7 @@ impl PdfMarkdownApp {
                 purpose,
                 result,
             });
+            egui_ctx.request_repaint();
         });
     }
 
@@ -2451,17 +2647,114 @@ impl PdfMarkdownApp {
     }
 
     fn pick_and_add_files(&mut self) {
-        let files = rfd::FileDialog::new()
-            .set_title("Add PDFs or images")
-            .add_filter(
-                "Documents",
-                &[
-                    "pdf", "png", "jpg", "jpeg", "bmp", "gif", "webp", "tif", "tiff",
-                ],
-            )
-            .pick_files();
-        if let Some(paths) = files {
-            self.add_files(paths);
+        #[cfg(target_os = "linux")]
+        {
+            self.start_linux_file_picker(FilePickerPurpose::AddDocuments);
+            return;
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let files = rfd::FileDialog::new()
+                .set_title("Add PDFs or images")
+                .add_filter(
+                    "Documents",
+                    &[
+                        "pdf", "png", "jpg", "jpeg", "bmp", "gif", "webp", "tif", "tiff",
+                    ],
+                )
+                .pick_files();
+            if let Some(paths) = files {
+                self.add_files(paths);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn start_linux_file_picker(&mut self, purpose: FilePickerPurpose) {
+        if self.file_picker_in_progress {
+            self.status_message = "A file chooser is already open.".to_owned();
+            return;
+        }
+        self.file_picker_in_progress = true;
+        self.status_message = match purpose {
+            FilePickerPurpose::AddDocuments => "Waiting for document selection...",
+            FilePickerPurpose::VlmModel => "Waiting for VLM model selection...",
+            FilePickerPurpose::MmprojModel => "Waiting for MMProj model selection...",
+        }
+        .to_owned();
+
+        let tx = self.background_tx.clone();
+        let egui_ctx = self.egui_ctx.clone();
+        let dialog = self.linux_file_dialog.clone();
+        thread::spawn(move || {
+            let paths = match purpose {
+                FilePickerPurpose::AddDocuments => pollster::block_on(
+                    dialog
+                        .clone()
+                        .set_title("Add PDFs or images")
+                        .add_filter(
+                            "Documents",
+                            &[
+                                "pdf", "png", "jpg", "jpeg", "bmp", "gif", "webp", "tif", "tiff",
+                            ],
+                        )
+                        .pick_files(),
+                )
+                .unwrap_or_default()
+                .into_iter()
+                .map(|handle| handle.path().to_path_buf())
+                .collect(),
+                FilePickerPurpose::VlmModel => pollster::block_on(
+                    dialog
+                        .clone()
+                        .set_title("Select VLM model (.gguf)")
+                        .add_filter("GGUF model", &["gguf"])
+                        .pick_file(),
+                )
+                .into_iter()
+                .map(|handle| handle.path().to_path_buf())
+                .collect(),
+                FilePickerPurpose::MmprojModel => pollster::block_on(
+                    dialog
+                        .set_title("Select MMProj model (.gguf)")
+                        .add_filter("GGUF model", &["gguf"])
+                        .pick_file(),
+                )
+                .into_iter()
+                .map(|handle| handle.path().to_path_buf())
+                .collect(),
+            };
+            let _ = tx.send(BackgroundEvent::FilePickerFinished { purpose, paths });
+            egui_ctx.request_repaint();
+        });
+    }
+
+    fn apply_picked_model_path(&mut self, purpose: FilePickerPurpose, path: PathBuf) {
+        let (label, path_text) = match purpose {
+            FilePickerPurpose::VlmModel => {
+                self.settings.vlm_model_path = path.display().to_string();
+                ("VLM model", self.settings.vlm_model_path.clone())
+            }
+            FilePickerPurpose::MmprojModel => {
+                self.settings.vlm_mmproj_path = path.display().to_string();
+                ("MMProj model", self.settings.vlm_mmproj_path.clone())
+            }
+            FilePickerPurpose::AddDocuments => return,
+        };
+        match self.save_settings_now() {
+            Ok(()) => {
+                self.status_message = format!("Saved default {label} path.");
+                self.update_setup_modal_after_requirement_change();
+                self.push_log(
+                    LogLevel::Info,
+                    format!("Default {label} set to '{path_text}'."),
+                );
+            }
+            Err(err) => {
+                self.status_message = format!("Failed to save {label} path: {err}");
+                self.push_log(LogLevel::Error, self.status_message.clone());
+            }
         }
     }
 
@@ -2882,20 +3175,11 @@ impl PdfMarkdownApp {
             LoadedDocumentKind::Pdf { pages, markdown } => {
                 let mut ui_pages = Vec::with_capacity(pages.len());
                 for page in pages {
-                    let texture_name = format!("loaded_texture_{}", self.next_texture_id);
-                    self.next_texture_id += 1;
-                    let texture = load_rgba_texture(
-                        ctx,
-                        page.raster.width,
-                        page.raster.height,
-                        &page.raster.rgba,
-                        texture_name,
-                    );
-                    let image_size = texture.size_vec2();
                     ui_pages.push(PdfPageData {
-                        texture,
-                        image_size,
+                        texture: None,
+                        image_size: page.preview_size,
                         text: page.text,
+                        render_state: PdfPageRenderState::NotRequested,
                     });
                 }
                 self.markdown_cache.clear_scrollable();
@@ -2947,7 +3231,119 @@ impl PdfMarkdownApp {
         if self.selected_doc.is_none() {
             self.select_document(index);
         }
+        self.request_pdf_page_renders(index, &[0]);
         Ok(name)
+    }
+
+    fn request_pdf_page_renders(&mut self, document_index: usize, page_indices: &[usize]) {
+        let Some(document) = self.documents.get_mut(document_index) else {
+            return;
+        };
+        let DocumentKind::Pdf(pdf_data) = &mut document.kind else {
+            return;
+        };
+
+        let mut requested = Vec::new();
+        for page_index in page_indices.iter().copied() {
+            let Some(page) = pdf_data.pages.get_mut(page_index) else {
+                continue;
+            };
+            if matches!(
+                page.render_state,
+                PdfPageRenderState::NotRequested | PdfPageRenderState::Failed(_)
+            ) {
+                page.render_state = PdfPageRenderState::Queued;
+                requested.push(page_index);
+            }
+        }
+        if requested.is_empty() {
+            return;
+        }
+
+        let doc_id = document.id;
+        let path = document.path.clone();
+        let runtime_dir = self.effective_runtime_dir();
+        let tx = self.background_tx.clone();
+        thread::spawn(move || {
+            let results = render_pdf_pages(&path, &runtime_dir, &requested);
+            let _ = tx.send(BackgroundEvent::PdfPagesRendered { doc_id, results });
+        });
+    }
+
+    fn install_pdf_page_renders(
+        &mut self,
+        ctx: &egui::Context,
+        doc_id: usize,
+        results: Vec<(usize, Result<LoadedRaster, String>)>,
+    ) {
+        let Some(document_index) = self.documents.iter().position(|doc| doc.id == doc_id) else {
+            return;
+        };
+
+        let mut errors = Vec::new();
+        if let DocumentKind::Pdf(pdf_data) = &mut self.documents[document_index].kind {
+            for (page_index, result) in results {
+                let Some(page) = pdf_data.pages.get_mut(page_index) else {
+                    continue;
+                };
+                match result {
+                    Ok(raster) => {
+                        let texture_name = format!("pdf_page_texture_{}", self.next_texture_id);
+                        self.next_texture_id += 1;
+                        let texture = load_rgba_texture(
+                            ctx,
+                            raster.width,
+                            raster.height,
+                            &raster.rgba,
+                            texture_name,
+                        );
+                        page.image_size = texture.size_vec2();
+                        page.texture = Some(texture);
+                        page.render_state = PdfPageRenderState::Ready;
+                    }
+                    Err(err) => {
+                        errors.push(format!("Page {}: {err}", page_index + 1));
+                        page.texture = None;
+                        page.render_state = PdfPageRenderState::Failed(err);
+                    }
+                }
+            }
+
+            let ready_count = pdf_data
+                .pages
+                .iter()
+                .filter(|page| page.texture.is_some())
+                .count();
+            if ready_count > MAX_PDF_PAGE_TEXTURES_PER_DOCUMENT {
+                let mut candidates = pdf_data
+                    .pages
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, page)| {
+                        (page.texture.is_some() && index != self.current_page).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                candidates
+                    .sort_by_key(|index| std::cmp::Reverse(index.abs_diff(self.current_page)));
+                for index in candidates
+                    .into_iter()
+                    .take(ready_count - MAX_PDF_PAGE_TEXTURES_PER_DOCUMENT)
+                {
+                    if let Some(page) = pdf_data.pages.get_mut(index) {
+                        page.texture = None;
+                        page.render_state = PdfPageRenderState::NotRequested;
+                    }
+                }
+            }
+        }
+
+        for error in errors {
+            self.push_log(
+                LogLevel::Error,
+                format!("PDF preview render failed: {error}"),
+            );
+        }
+        ctx.request_repaint();
     }
 
     fn run_search_for_selected(&mut self) {
@@ -3620,6 +4016,13 @@ impl PdfMarkdownApp {
         self.pending_sync_to_pdf = pending_pdf_sync;
         self.pending_sync_to_markdown = pending_md_sync;
 
+        let preview_pages = pdf_preview_page_window(
+            self.current_page,
+            &left_metrics.visible_pages,
+            self.documents[selected_index].page_count(),
+        );
+        self.request_pdf_page_renders(selected_index, &preview_pages);
+
         let left_scroll_delta =
             (left_metrics.scroll_offset_y - self.last_pdf_scroll_offset_y).abs();
         let right_scroll_delta =
@@ -3646,14 +4049,12 @@ impl PdfMarkdownApp {
             if let Some(page) = left_metrics.first_visible_page {
                 if page != self.current_page {
                     self.set_current_page(page, false, false);
-                    self.pending_sync_to_markdown = Some(page);
                 }
             }
         } else if right_driving && !left_driving {
             if let Some(page) = right_metrics.first_visible_page {
                 if page != self.current_page {
                     self.set_current_page(page, false, false);
-                    self.pending_sync_to_pdf = Some(page);
                 }
             }
         }
@@ -4094,7 +4495,13 @@ impl PdfMarkdownApp {
                 ui.heading("Runtime");
                 ui.label("App data root:");
                 ui.monospace(self.paths.app_data_dir.display().to_string());
+                #[cfg(target_os = "linux")]
+                ui.label("Selected system Engine runtime:");
+                #[cfg(not(target_os = "linux"))]
                 ui.label("App runtime path:");
+                #[cfg(target_os = "linux")]
+                ui.monospace(self.effective_runtime_dir().display().to_string());
+                #[cfg(not(target_os = "linux"))]
                 ui.monospace(self.paths.app_runtime_dir.display().to_string());
                 ui.label("Settings file:");
                 ui.monospace(self.paths.settings_json.display().to_string());
@@ -4102,30 +4509,41 @@ impl PdfMarkdownApp {
                 ui.monospace(self.paths.models_dir.display().to_string());
                 ui.label("Conversion output:");
                 ui.label("Saved next to each source file as <source>FAST.md or <source>VLM.md");
+                #[cfg(target_os = "linux")]
                 ui.label(
-                    RichText::new("This app now keeps its own Engine runtime under its app data folder. Shared models stay in the global OpenResearchTools models root.")
+                    RichText::new("Engine is installed system-wide by APT. The backend selector maps directly to /opt/openresearchtools/engine/vulkan or /opt/openresearchtools/engine/cuda; this app does not download or copy Engine on Linux.")
                         .small()
                         .color(Color32::from_rgb(89, 95, 105)),
                 );
-                ui.horizontal(|ui| {
-                    ui.label("Runtime dir");
-                    ui.text_edit_singleline(&mut self.settings.runtime_dir);
-                    if ui.button("Browse").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .set_title("Select runtime folder")
-                            .pick_folder()
-                        {
-                            self.settings.runtime_dir = path.display().to_string();
-                            self.runtime_post_install_prompt = false;
-                            self.refresh_runtime_state();
-                            self.reset_device_enumeration_cache();
-                            self.ensure_devices_enumerated_for_runtime();
-                            self.update_setup_modal_after_requirement_change();
+                #[cfg(not(target_os = "linux"))]
+                {
+                    ui.label(
+                        RichText::new("This app now keeps its own Engine runtime under its app data folder. Shared models stay in the global OpenResearchTools models root.")
+                            .small()
+                            .color(Color32::from_rgb(89, 95, 105)),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("Runtime dir");
+                        ui.text_edit_singleline(&mut self.settings.runtime_dir);
+                        if ui.button("Browse").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_title("Select runtime folder")
+                                .pick_folder()
+                            {
+                                self.settings.runtime_dir = path.display().to_string();
+                                self.runtime_post_install_prompt = false;
+                                self.refresh_runtime_state();
+                                self.reset_device_enumeration_cache();
+                                self.ensure_devices_enumerated_for_runtime();
+                                self.update_setup_modal_after_requirement_change();
+                            }
                         }
-                    }
-                });
+                    });
+                }
 
                 ui.horizontal_wrapped(|ui| {
+                    #[cfg(not(target_os = "linux"))]
+                    {
                     let runtime_busy = self.runtime_maintenance_in_progress();
                     let runtime_missing = !self.runtime_check.is_ok();
                     if ui.button("Use app runtime dir").clicked() {
@@ -4181,8 +4599,25 @@ impl PdfMarkdownApp {
                     } else {
                         ui.label("Linux: unsigned-runtime unblock is not required.");
                     }
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        if ui.button("Reload installed Engine check").clicked() {
+                            self.refresh_runtime_state();
+                            self.reset_device_enumeration_cache();
+                            self.ensure_devices_enumerated_for_runtime();
+                            self.update_setup_modal_after_requirement_change();
+                        }
+                        ui.label("Managed by packages openresearchtools-engine and openresearchtools-engine-cuda.");
+                    }
                 });
                 if !self.runtime_check.is_ok() {
+                    #[cfg(target_os = "linux")]
+                    ui.colored_label(
+                        Color32::from_rgb(167, 37, 37),
+                        "Selected Engine package is incomplete. Install or repair both required packages with APT.",
+                    );
+                    #[cfg(not(target_os = "linux"))]
                     ui.colored_label(
                         Color32::from_rgb(167, 37, 37),
                         "Runtime files are missing. Use 'Download / Repair Runtime (Required)' to install/repair.",
@@ -4262,7 +4697,7 @@ impl PdfMarkdownApp {
                     }
                 }
 
-                #[cfg(not(target_os = "windows"))]
+                #[cfg(target_os = "macos")]
                 {
                     if !self.runtime_assets.is_empty() {
                         let selected_index = self
@@ -4283,6 +4718,68 @@ impl PdfMarkdownApp {
                             });
                     } else {
                         ui.label("No platform runtime assets loaded.");
+                    }
+                }
+
+                #[cfg(target_os = "linux")]
+                {
+                    if self.runtime_install_backends.is_empty() {
+                        self.runtime_install_backends = Self::default_runtime_backends_for_platform();
+                    }
+                    let selected_index = self
+                        .selected_runtime_install_backend
+                        .min(self.runtime_install_backends.len().saturating_sub(1));
+                    let selected_text = self
+                        .runtime_install_backends
+                        .get(selected_index)
+                        .cloned()
+                        .unwrap_or_else(|| "vulkan".to_owned());
+                    let mut next_index = selected_index;
+                    ui.horizontal(|ui| {
+                        ui.label("Linux Engine backend");
+                        egui::ComboBox::from_id_salt("runtime_backend_linux_combo")
+                            .selected_text(selected_text.to_ascii_uppercase())
+                            .show_ui(ui, |ui| {
+                                for (index, backend) in self.runtime_install_backends.iter().enumerate()
+                                {
+                                    ui.selectable_value(
+                                        &mut next_index,
+                                        index,
+                                        backend.to_ascii_uppercase(),
+                                    );
+                                }
+                            });
+                    });
+                    if next_index != self.selected_runtime_install_backend {
+                        self.selected_runtime_install_backend = next_index;
+                        if let Some(backend) = self
+                            .runtime_install_backends
+                            .get(self.selected_runtime_install_backend)
+                            .cloned()
+                        {
+                            self.settings.runtime_download_backend = backend;
+                            self.settings.runtime_dir = linux_runtime_dir_for_backend(
+                                &self.settings.runtime_download_backend,
+                            )
+                            .display()
+                            .to_string();
+                            self.runtime_post_install_prompt = false;
+                            self.refresh_runtime_state();
+                            self.reset_device_enumeration_cache();
+                            self.ensure_devices_enumerated_for_runtime();
+                            self.update_setup_modal_after_requirement_change();
+                            if let Err(err) = self.save_settings_now() {
+                                self.runtime_status =
+                                    format!("Failed to save Engine backend selection: {err}");
+                                self.push_log(LogLevel::Error, self.runtime_status.clone());
+                            } else {
+                                self.runtime_status = format!(
+                                    "Using installed {} Engine runtime at {}.",
+                                    self.settings.runtime_download_backend.to_ascii_uppercase(),
+                                    self.effective_runtime_dir().display()
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -4354,6 +4851,9 @@ impl PdfMarkdownApp {
                             ui.label("VLM model");
                             ui.text_edit_singleline(&mut self.settings.vlm_model_path);
                             if ui.button("Pick").clicked() {
+                                #[cfg(target_os = "linux")]
+                                self.start_linux_file_picker(FilePickerPurpose::VlmModel);
+                                #[cfg(not(target_os = "linux"))]
                                 if let Some(path) = rfd::FileDialog::new()
                                     .set_title("Select VLM model (.gguf)")
                                     .pick_file()
@@ -4388,6 +4888,9 @@ impl PdfMarkdownApp {
                             ui.label("MMProj model");
                             ui.text_edit_singleline(&mut self.settings.vlm_mmproj_path);
                             if ui.button("Pick").clicked() {
+                                #[cfg(target_os = "linux")]
+                                self.start_linux_file_picker(FilePickerPurpose::MmprojModel);
+                                #[cfg(not(target_os = "linux"))]
                                 if let Some(path) = rfd::FileDialog::new()
                                     .set_title("Select MMProj model (.gguf)")
                                     .pick_file()
@@ -4910,10 +5413,12 @@ impl PdfMarkdownApp {
                 let split_viewport_width = ui.available_width().max(1.0);
                 let split_viewport_height = (ui.available_height() - 30.0).max(240.0);
 
-                ScrollArea::both()
+                // Keep vertical wheel input owned by the source and markdown panes.
+                // A nested outer vertical scroll area steals wheel events and makes
+                // the two document panes appear frozen on Linux.
+                ScrollArea::horizontal()
                     .id_salt("split_view_outer_scroll")
                     .auto_shrink([false, false])
-                    .max_height(split_viewport_height)
                     .min_scrolled_width(split_viewport_width)
                     .show(ui, |ui| {
                         self.ui_split_view(
@@ -4936,6 +5441,17 @@ impl PdfMarkdownApp {
 
 impl eframe::App for PdfMarkdownApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let dropped_files = ctx.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect::<Vec<_>>()
+        });
+        if !dropped_files.is_empty() {
+            self.add_files(dropped_files);
+        }
         self.process_background_events(ctx);
         self.ui_menu_bar(ctx);
         self.ui_top_panel(ctx);
@@ -5266,6 +5782,32 @@ fn resolve_active_page_by_rect_visibility(
     Some(0)
 }
 
+fn pdf_preview_page_window(
+    current_page: usize,
+    visible_pages: &[usize],
+    page_count: usize,
+) -> Vec<usize> {
+    if page_count == 0 {
+        return Vec::new();
+    }
+    let current_page = current_page.min(page_count - 1);
+    let mut pages = visible_pages
+        .iter()
+        .copied()
+        .filter(|index| *index < page_count)
+        .collect::<Vec<_>>();
+    pages.push(current_page);
+    if current_page > 0 {
+        pages.push(current_page - 1);
+    }
+    if current_page + 1 < page_count {
+        pages.push(current_page + 1);
+    }
+    pages.sort_unstable();
+    pages.dedup();
+    pages
+}
+
 fn render_source_pane(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
@@ -5279,6 +5821,7 @@ fn render_source_pane(
         DocumentKind::Pdf(pdf_data) => {
             let scroll_area = ScrollArea::vertical()
                 .id_salt(("source_pdf", document.id))
+                .max_height(ui.available_height().max(1.0))
                 .auto_shrink([false, false]);
 
             let scroll_output = scroll_area.show(ui, |ui| {
@@ -5299,7 +5842,34 @@ fn render_source_pane(
                             ui.label(RichText::new(format!("Page {}", index + 1)).strong());
                             let fit_scale = fit_width / page.image_size.x.max(1.0);
                             let display_size = page.image_size * fit_scale;
-                            ui.add(egui::Image::new(&page.texture).fit_to_exact_size(display_size));
+                            let (image_rect, _) =
+                                ui.allocate_exact_size(display_size, egui::Sense::hover());
+                            if ui.is_rect_visible(image_rect) {
+                                if let Some(texture) = &page.texture {
+                                    egui::Image::new(texture)
+                                        .fit_to_exact_size(display_size)
+                                        .paint_at(ui, image_rect);
+                                } else {
+                                    ui.painter().rect_filled(
+                                        image_rect,
+                                        4.0,
+                                        Color32::from_rgb(236, 238, 242),
+                                    );
+                                    let status = match &page.render_state {
+                                        PdfPageRenderState::NotRequested => "Preparing preview...",
+                                        PdfPageRenderState::Queued => "Rendering preview...",
+                                        PdfPageRenderState::Ready => "Preview ready",
+                                        PdfPageRenderState::Failed(err) => err.as_str(),
+                                    };
+                                    ui.painter().text(
+                                        image_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        status,
+                                        FontId::proportional(14.0),
+                                        Color32::from_rgb(91, 97, 108),
+                                    );
+                                }
+                            }
                         })
                         .response;
                     page_rects.push(frame_response.rect);
@@ -5327,17 +5897,27 @@ fn render_source_pane(
                 &scroll_output.inner,
                 scroll_output.inner_rect,
             );
+            let visible_pages = scroll_output
+                .inner
+                .iter()
+                .enumerate()
+                .filter_map(|(index, rect)| {
+                    rect.intersects(scroll_output.inner_rect).then_some(index)
+                })
+                .collect();
 
             PaneMetrics {
                 hovered,
                 user_scrolled,
                 scroll_offset_y: vertical_scroll_offset,
                 first_visible_page,
+                visible_pages,
             }
         }
         DocumentKind::Image(image_data) => {
             let scroll_output = ScrollArea::vertical()
                 .id_salt(("source_image", document.id))
+                .max_height(ui.available_height().max(1.0))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     let fit_width = ui.available_width().max(120.0);
@@ -5360,6 +5940,7 @@ fn render_source_pane(
                 user_scrolled,
                 scroll_offset_y: vertical_scroll_offset,
                 first_visible_page: Some(0),
+                visible_pages: vec![0],
             }
         }
     }
@@ -5507,14 +6088,17 @@ fn render_markdown_pane(
             user_scrolled,
             scroll_offset_y: vertical_scroll_offset,
             first_visible_page: Some(current_page),
+            visible_pages: vec![current_page],
         };
     }
 
     let page_count = document.page_count();
     let markdown_pages = split_markdown_by_page_markers(&document.markdown, page_count);
+    let display_page = current_page.min(page_count.saturating_sub(1));
 
     let scroll_area = ScrollArea::vertical()
         .id_salt(("md_view", document.id))
+        .max_height(ui.available_height().max(1.0))
         .max_width(ui.available_width().max(1.0))
         .auto_shrink([false, false]);
 
@@ -5524,9 +6108,13 @@ fn render_markdown_pane(
             scroll_area.show(ui, |ui| {
                 let page_outer_width = ui.available_width().max(1.0);
                 ui.set_max_width(page_outer_width);
-                let mut page_rects = Vec::with_capacity(page_count);
+                let mut page_rects = Vec::with_capacity(1);
 
-                for page_index in 0..page_count {
+                // Markdown can contain thousands of widgets after VLM conversion.
+                // Only lay out the page paired with the current PDF page; page
+                // navigation changes this index. Rendering every page on every
+                // frame made wheel input and window events wait behind layout.
+                for page_index in std::iter::once(display_page) {
                     let current_page_stroke = if current_page == page_index {
                         Stroke::new(2.0, ui.visuals().selection.stroke.color)
                     } else {
@@ -5634,8 +6222,8 @@ fn render_markdown_pane(
                 || input.smooth_scroll_delta.y.abs() > f32::EPSILON
         });
     let vertical_scroll_offset = scroll_output.state.offset.y.max(0.0);
-    let first_visible_page =
-        resolve_active_page_by_rect_visibility(&scroll_output.inner, scroll_output.inner_rect);
+    let first_visible_page = Some(display_page);
+    let visible_pages = vec![display_page];
     let double_clicked = hovered
         && ctx.input(|input| {
             input
@@ -5654,6 +6242,7 @@ fn render_markdown_pane(
         user_scrolled,
         scroll_offset_y: vertical_scroll_offset,
         first_visible_page,
+        visible_pages,
     }
 }
 
@@ -5687,6 +6276,14 @@ fn bind_pdfium_for_loading(runtime_dir: &Path) -> Result<Pdfium, String> {
     Err("Could not load Pdfium. Install runtime or provide pdfium library.".to_owned())
 }
 
+fn lock_pdfium_worker() -> MutexGuard<'static, ()> {
+    static PDFIUM_WORKER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    PDFIUM_WORKER_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn load_document_payload(
     path: &Path,
     runtime_dir: &Path,
@@ -5699,6 +6296,9 @@ fn load_document_payload(
         .to_ascii_lowercase();
 
     if extension == "pdf" {
+        // PDFium's C API is not re-entrant. Serialize only background PDFium
+        // workers; the GUI thread never takes this lock.
+        let _pdfium_guard = lock_pdfium_worker();
         on_status("0% Opening PDF".to_owned());
         let pdfium = bind_pdfium_for_loading(runtime_dir)?;
         let document = pdfium
@@ -5717,28 +6317,19 @@ fn load_document_payload(
                 .text()
                 .map(|text_page| text_page.all())
                 .unwrap_or_default();
-            let render_config = PdfRenderConfig::new()
-                .set_target_width(1500)
-                .set_maximum_height(2200);
-            let bitmap = page
-                .render_with_config(&render_config)
-                .map_err(|err| format!("Failed to render page {}: {err}", index + 1))?;
-            let rgba = bitmap.as_image().to_rgba8();
-            let width = rgba.width() as usize;
-            let height = rgba.height() as usize;
+            let page_width = page.width().value.max(1.0);
+            let page_height = page.height().value.max(1.0);
+            let scale = (PDF_PREVIEW_RENDER_WIDTH as f32 / page_width)
+                .min(PDF_PREVIEW_RENDER_MAX_HEIGHT as f32 / page_height);
 
             loaded_pages.push(LoadedPdfPagePayload {
-                raster: LoadedRaster {
-                    width,
-                    height,
-                    rgba: rgba.into_raw(),
-                },
+                preview_size: Vec2::new(page_width * scale, page_height * scale),
                 text,
             });
 
             let percent = ((index + 1) as f32 / page_count.max(1) as f32) * 100.0;
             on_status(format!(
-                "{percent:.1}% Rendering PDF pages ({}/{})",
+                "{percent:.1}% Reading PDF page metadata ({}/{})",
                 index + 1,
                 page_count
             ));
@@ -5758,7 +6349,9 @@ fn load_document_payload(
         on_status("35% Decoding image".to_owned());
         let image = image::open(path)
             .map_err(|err| format!("Failed to load image {}: {err}", path.to_string_lossy()))?;
-        let rgba = image.to_rgba8();
+        // The source file remains untouched and is passed to Engine for conversion.
+        // Bound only the GUI preview so a huge scan cannot exhaust GUI/GPU memory.
+        let rgba = image.thumbnail(2200, 2200).to_rgba8();
         let width = rgba.width() as usize;
         let height = rgba.height() as usize;
         let name = file_name_or_path(path);
@@ -5777,6 +6370,61 @@ fn load_document_payload(
         "Unsupported file type for {}",
         path.to_string_lossy()
     ))
+}
+
+fn render_pdf_pages(
+    path: &Path,
+    runtime_dir: &Path,
+    page_indices: &[usize],
+) -> Vec<(usize, Result<LoadedRaster, String>)> {
+    let _pdfium_guard = lock_pdfium_worker();
+    let pdfium = match bind_pdfium_for_loading(runtime_dir) {
+        Ok(pdfium) => pdfium,
+        Err(err) => {
+            return page_indices
+                .iter()
+                .copied()
+                .map(|index| (index, Err(err.clone())))
+                .collect();
+        }
+    };
+    let document = match pdfium.load_pdf_from_file(path, None) {
+        Ok(document) => document,
+        Err(err) => {
+            let message = format!("Failed to open {}: {err}", path.to_string_lossy());
+            return page_indices
+                .iter()
+                .copied()
+                .map(|index| (index, Err(message.clone())))
+                .collect();
+        }
+    };
+
+    page_indices
+        .iter()
+        .copied()
+        .map(|index| {
+            let result = (|| {
+                let page = document
+                    .pages()
+                    .get(index as u16)
+                    .map_err(|err| format!("Failed to read page {}: {err}", index + 1))?;
+                let render_config = PdfRenderConfig::new()
+                    .set_target_width(PDF_PREVIEW_RENDER_WIDTH)
+                    .set_maximum_height(PDF_PREVIEW_RENDER_MAX_HEIGHT);
+                let bitmap = page
+                    .render_with_config(&render_config)
+                    .map_err(|err| format!("Failed to render page {}: {err}", index + 1))?;
+                let rgba = bitmap.as_image().to_rgba8();
+                Ok(LoadedRaster {
+                    width: rgba.width() as usize,
+                    height: rgba.height() as usize,
+                    rgba: rgba.into_raw(),
+                })
+            })();
+            (index, result)
+        })
+        .collect()
 }
 
 fn load_rgba_texture(
@@ -6335,4 +6983,59 @@ fn configured_path_exists(path_text: &str) -> bool {
         return false;
     }
     Path::new(trimmed).is_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pdf_preview_window_is_bounded_and_includes_current_neighbors() {
+        assert_eq!(pdf_preview_page_window(5, &[4, 5, 6], 20), vec![4, 5, 6]);
+        assert_eq!(pdf_preview_page_window(0, &[0], 20), vec![0, 1]);
+        assert_eq!(pdf_preview_page_window(19, &[19, 50], 20), vec![18, 19]);
+        assert!(pdf_preview_page_window(0, &[0], 0).is_empty());
+    }
+
+    #[test]
+    fn loaded_pdf_page_payload_keeps_metadata_without_full_page_rgba() {
+        let page = LoadedPdfPagePayload {
+            preview_size: Vec2::new(1200.0, 1600.0),
+            text: "preview text".to_owned(),
+        };
+
+        assert_eq!(page.preview_size, Vec2::new(1200.0, 1600.0));
+        assert_eq!(page.text, "preview text");
+        assert_eq!(
+            std::mem::size_of_val(&page),
+            std::mem::size_of::<Vec2>() + std::mem::size_of::<String>()
+        );
+    }
+
+    #[test]
+    fn backend_switch_normalizes_stale_gpu_index_to_available_gpu() {
+        let options = vec![
+            VlmDeviceOption {
+                label: VLM_DEVICE_CPU_LABEL.to_owned(),
+                devices_value: "none".to_owned(),
+                main_gpu: 0,
+                is_gpu: false,
+                detail_line: VLM_DEVICE_CPU_LABEL.to_owned(),
+            },
+            VlmDeviceOption {
+                label: "GPU #0 (CUDA): NVIDIA GPU".to_owned(),
+                devices_value: "0".to_owned(),
+                main_gpu: 0,
+                is_gpu: true,
+                detail_line: "CUDA0".to_owned(),
+            },
+        ];
+        let mut settings = AppSettings::default();
+        settings.devices = "1".to_owned();
+
+        let selected = PdfMarkdownApp::resolve_selected_device_index(&options, &settings);
+
+        assert_eq!(selected, 1);
+        assert_eq!(options[selected].devices_value, "0");
+    }
 }

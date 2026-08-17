@@ -7,6 +7,36 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_VLM_PROMPT: &str = "Convert this page to markdown. Do not miss any text and only output the bare markdown! Any graphs or figures found convert to markdown table. If figure is image without details, describe what you see in the image. For tables, pay attention to whitespace: some cells may be intentionally empty, so keep empty and filled cells in the correct columns. Ensure correct assignment of column headings and subheadings for tables.";
 pub const DEFAULT_IMAGE_VLM_PROMPT: &str = "Describe this image in high detail and output clean markdown. Include all visible text exactly, preserve structure, and use markdown tables when tabular content is present. For charts or figures, summarize key visual elements and values if readable.";
 
+#[cfg(target_os = "linux")]
+pub const LINUX_VULKAN_RUNTIME_DIR: &str = "/opt/openresearchtools/engine/vulkan";
+#[cfg(target_os = "linux")]
+pub const LINUX_CUDA_RUNTIME_DIR: &str = "/opt/openresearchtools/engine/cuda";
+
+#[cfg(target_os = "linux")]
+pub fn linux_runtime_dir_for_backend(backend: &str) -> PathBuf {
+    match backend.trim().to_ascii_lowercase().as_str() {
+        "cuda" => PathBuf::from(LINUX_CUDA_RUNTIME_DIR),
+        _ => PathBuf::from(LINUX_VULKAN_RUNTIME_DIR),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::*;
+
+    #[test]
+    fn maps_linux_backends_to_installed_engine_roots() {
+        assert_eq!(
+            linux_runtime_dir_for_backend("vulkan"),
+            PathBuf::from("/opt/openresearchtools/engine/vulkan")
+        );
+        assert_eq!(
+            linux_runtime_dir_for_backend(" CUDA "),
+            PathBuf::from("/opt/openresearchtools/engine/cuda")
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppPaths {
     pub base_config_dir: PathBuf,
@@ -158,6 +188,9 @@ pub fn app_paths() -> Result<AppPaths, String> {
     let (ort_config_root, ort_data_root) = openresearchtools_roots()?;
     let app_config_dir = ort_config_root.join("PDF Markdown Studio");
     let app_data_dir = ort_data_root.join("PDF Markdown Studio");
+    #[cfg(target_os = "linux")]
+    let app_runtime_dir = PathBuf::from(LINUX_VULKAN_RUNTIME_DIR);
+    #[cfg(not(target_os = "linux"))]
     let app_runtime_dir = app_data_dir.join("Engine");
     let models_dir = ort_data_root.join("models");
     let manifest_cache_dir = app_config_dir.join("runtime-manifests");
@@ -176,15 +209,18 @@ pub fn app_paths() -> Result<AppPaths, String> {
 }
 
 pub fn ensure_dirs(paths: &AppPaths) -> Result<(), String> {
-    for dir in [
+    let mut dirs = vec![
         &paths.base_config_dir,
         &paths.base_data_dir,
         &paths.app_config_dir,
         &paths.app_data_dir,
-        &paths.app_runtime_dir,
         &paths.models_dir,
         &paths.manifest_cache_dir,
-    ] {
+    ];
+    #[cfg(not(target_os = "linux"))]
+    dirs.push(&paths.app_runtime_dir);
+
+    for dir in dirs {
         fs::create_dir_all(dir)
             .map_err(|err| format!("failed to create '{}': {err}", dir.display()))?;
     }
@@ -192,15 +228,31 @@ pub fn ensure_dirs(paths: &AppPaths) -> Result<(), String> {
 }
 
 pub fn default_runtime_dir(paths: &AppPaths) -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = paths;
+        return PathBuf::from(LINUX_VULKAN_RUNTIME_DIR);
+    }
+
+    #[cfg(not(target_os = "linux"))]
     paths.app_runtime_dir.clone()
 }
 
 pub fn runtime_dir_from_settings(settings: &AppSettings, paths: &AppPaths) -> PathBuf {
-    let trimmed = settings.runtime_dir.trim();
-    if trimmed.is_empty() {
-        default_runtime_dir(paths)
-    } else {
-        PathBuf::from(trimmed)
+    #[cfg(target_os = "linux")]
+    {
+        let _ = paths;
+        return linux_runtime_dir_for_backend(&settings.runtime_download_backend);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let trimmed = settings.runtime_dir.trim();
+        if trimmed.is_empty() {
+            default_runtime_dir(paths)
+        } else {
+            PathBuf::from(trimmed)
+        }
     }
 }
 
@@ -226,18 +278,6 @@ pub fn load_settings(paths: &AppPaths) -> Result<AppSettings, String> {
 
     let mut runtime_path_migrated = false;
     let mut markdown_font_size_migrated = false;
-    if parsed.runtime_dir.trim().is_empty() {
-        parsed.runtime_dir = default_runtime_dir(paths).display().to_string();
-    } else {
-        let configured = PathBuf::from(parsed.runtime_dir.trim());
-        if runtime_dir_is_legacy_default(&configured, paths) {
-            parsed.runtime_dir = default_runtime_dir(paths).display().to_string();
-            runtime_path_migrated = true;
-        }
-    }
-    if parsed.vlm_prompt.trim().is_empty() {
-        parsed.vlm_prompt = DEFAULT_VLM_PROMPT.to_owned();
-    }
     if parsed.runtime_download_backend.trim().is_empty() {
         parsed.runtime_download_backend = if cfg!(target_os = "windows") {
             "vulkan".to_owned()
@@ -249,6 +289,34 @@ pub fn load_settings(paths: &AppPaths) -> Result<AppSettings, String> {
     } else {
         parsed.runtime_download_backend =
             parsed.runtime_download_backend.trim().to_ascii_lowercase();
+    }
+    #[cfg(target_os = "linux")]
+    if parsed.runtime_download_backend != "cuda" && parsed.runtime_download_backend != "vulkan" {
+        parsed.runtime_download_backend = "vulkan".to_owned();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let installed_runtime = linux_runtime_dir_for_backend(&parsed.runtime_download_backend)
+            .display()
+            .to_string();
+        if parsed.runtime_dir != installed_runtime {
+            parsed.runtime_dir = installed_runtime;
+            runtime_path_migrated = true;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    if parsed.runtime_dir.trim().is_empty() {
+        parsed.runtime_dir = default_runtime_dir(paths).display().to_string();
+    } else {
+        let configured = PathBuf::from(parsed.runtime_dir.trim());
+        if runtime_dir_is_legacy_default(&configured, paths) {
+            parsed.runtime_dir = default_runtime_dir(paths).display().to_string();
+            runtime_path_migrated = true;
+        }
+    }
+    if parsed.vlm_prompt.trim().is_empty() {
+        parsed.vlm_prompt = DEFAULT_VLM_PROMPT.to_owned();
     }
     if parsed.vlm_image_prompt.trim().is_empty() {
         parsed.vlm_image_prompt = DEFAULT_IMAGE_VLM_PROMPT.to_owned();

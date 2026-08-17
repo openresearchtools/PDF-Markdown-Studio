@@ -130,6 +130,23 @@ pub fn check_runtime_dir(runtime_dir: &Path) -> RuntimeCheck {
         return check;
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        let descriptor = runtime_dir.join("engine-runtime.json");
+        if !descriptor.is_file() {
+            check
+                .missing
+                .push("Missing installed-engine descriptor: engine-runtime.json".to_owned());
+        }
+
+        let cli = runtime_dir.join("example-cli");
+        if !cli.is_file() {
+            check
+                .missing
+                .push("Missing installed Engine CLI: example-cli".to_owned());
+        }
+    }
+
     let bridge = runtime_dir.join(bridge_library_file_name());
     if !bridge.exists() {
         check.missing.push(format!(

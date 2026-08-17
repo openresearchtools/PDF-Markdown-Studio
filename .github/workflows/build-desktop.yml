@@ -26,162 +26,14 @@ on:
         required: true
         type: boolean
         default: false
-      include_ubuntu:
-        description: "Include Ubuntu .deb build in this release"
-        required: true
-        type: boolean
-        default: false
+      non_linux_assets_release_tag:
+        description: "Existing release tag to reuse for Windows/macOS assets (defaults to latest published release)"
+        required: false
+        type: string
 
 jobs:
-  build:
-    name: Build (${{ matrix.platform_key }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            platform_key: windows-x64
-            binary_name: pdf_markdown_studio.exe
-          - runner: macos-14
-            target: aarch64-apple-darwin
-            platform_key: macos-arm64
-            binary_name: pdf_markdown_studio
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libx11-dev \
-            libxcb1-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxkbcommon-dev \
-            libwayland-dev \
-            libgtk-3-dev \
-            libasound2-dev \
-            libudev-dev
-
-      - name: Build release
-        shell: pwsh
-        run: cargo build --release --locked --target ${{ matrix.target }}
-
-      - name: Validate runtime manifest mapping for platform
-        shell: pwsh
-        run: >
-          python scripts/ci_fetch_engine_runtime.py
-          --manifest runtime-manifests/engine-manifest.json
-          --platform ${{ matrix.platform_key }}
-          --check-only
-          --selection-out dist/runtime-selection-${{ matrix.platform_key }}.json
-
-      - name: Normalize Windows .exe filename
-        if: matrix.platform_key == 'windows-x64'
-        shell: pwsh
-        run: |
-          $binaryPath = "target/${{ matrix.target }}/release/${{ matrix.binary_name }}"
-          if (!(Test-Path $binaryPath)) {
-            throw "Built binary not found: $binaryPath"
-          }
-          Copy-Item $binaryPath "dist/pdf-markdown-studio-windows-x64.exe" -Force
-
-      - name: Build Ubuntu .deb package
-        if: matrix.platform_key == 'ubuntu-x64'
-        shell: bash
-        run: |
-          python3 scripts/build_linux_deb.py \
-            --repo-root . \
-            --binary "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" \
-            --output-dir dist
-
-      - name: Normalize Ubuntu .deb filename
-        if: matrix.platform_key == 'ubuntu-x64'
-        shell: bash
-        run: |
-          set -euo pipefail
-          deb_path="$(ls dist/*.deb | head -n 1)"
-          cp "$deb_path" "dist/pdf-markdown-studio-ubuntu-amd64.deb"
-
-      - name: Build macOS .app and .dmg package
-        if: matrix.platform_key == 'macos-arm64'
-        shell: bash
-        run: |
-          icon_args=()
-          if [[ -f "logo/macos/AppIcon.icns" ]]; then
-            icon_args=(--icon "logo/macos/AppIcon.icns")
-          fi
-          bash scripts/build_macos_dmg.sh \
-            --repo-root . \
-            --target "${{ matrix.target }}" \
-            --binary "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" \
-            --output-dir dist \
-            --skip-build \
-            "${icon_args[@]}"
-
-      - name: Normalize macOS .dmg filename
-        if: matrix.platform_key == 'macos-arm64'
-        shell: bash
-        run: |
-          set -euo pipefail
-          dmg_path="$(ls dist/*.dmg | head -n 1)"
-          cp "$dmg_path" "dist/pdf-markdown-studio-macos-arm64.dmg"
-
-      - name: Upload Windows .exe artifact
-        if: matrix.platform_key == 'windows-x64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: pdf-markdown-studio-windows-x64-exe
-          path: dist/pdf-markdown-studio-windows-x64.exe
-          if-no-files-found: error
-
-      - name: Upload Ubuntu .deb artifact
-        if: matrix.platform_key == 'ubuntu-x64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: pdf-markdown-studio-ubuntu-x64-deb
-          path: dist/pdf-markdown-studio-ubuntu-amd64.deb
-          if-no-files-found: error
-
-      - name: Upload macOS app/dmg artifact
-        if: matrix.platform_key == 'macos-arm64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: pdf-markdown-studio-macos-arm64-dmg
-          path: |
-            dist/PDF Markdown Studio.app
-            dist/*.dmg
-          if-no-files-found: error
-
-      - name: Upload macOS .dmg artifact
-        if: matrix.platform_key == 'macos-arm64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: pdf-markdown-studio-macos-arm64-dmg-only
-          path: dist/pdf-markdown-studio-macos-arm64.dmg
-          if-no-files-found: error
-
-  build_ubuntu:
-    if: ${{ inputs.include_ubuntu }}
-    name: Build (ubuntu-x64)
+  build_linux:
+    name: Build Linux x64 .deb
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -212,20 +64,16 @@ jobs:
             libwayland-dev \
             libgtk-3-dev \
             libasound2-dev \
-            libudev-dev
+            libudev-dev \
+            desktop-file-utils
 
       - name: Build release
-        shell: pwsh
+        shell: bash
         run: cargo build --release --locked --target x86_64-unknown-linux-gnu
 
-      - name: Validate runtime manifest mapping for platform
-        shell: pwsh
-        run: >
-          python scripts/ci_fetch_engine_runtime.py
-          --manifest runtime-manifests/engine-manifest.json
-          --platform ubuntu-x64
-          --check-only
-          --selection-out dist/runtime-selection-ubuntu-x64.json
+      - name: Test Linux Engine selection
+        shell: bash
+        run: cargo test --locked --target x86_64-unknown-linux-gnu
 
       - name: Build Ubuntu .deb package
         shell: bash
@@ -242,6 +90,88 @@ jobs:
           deb_path="$(ls dist/*.deb | head -n 1)"
           cp "$deb_path" "dist/pdf-markdown-studio-ubuntu-amd64.deb"
 
+      - name: Verify Ubuntu .deb identity and contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb_path="dist/pdf-markdown-studio-ubuntu-amd64.deb"
+          extract_root="$(mktemp -d)"
+          trap 'rm -rf "$extract_root"' EXIT
+          dpkg-deb -x "$deb_path" "$extract_root"
+
+          DEB_PATH="$deb_path" EXTRACT_ROOT="$extract_root" python3 - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+
+          deb_path = Path(os.environ["DEB_PATH"])
+          extract_root = Path(os.environ["EXTRACT_ROOT"])
+
+          def field(name: str) -> str:
+              return subprocess.check_output(
+                  ["dpkg-deb", "--field", str(deb_path), name],
+                  text=True,
+              ).strip()
+
+          assert field("Package") == "pdf-markdown-studio"
+          assert field("Architecture") == "amd64"
+
+          dependencies = [item.strip() for item in field("Depends").split(",")]
+          assert "openresearchtools-engine" in dependencies
+          assert "openresearchtools-engine-cuda" in dependencies
+
+          desktop_path = extract_root / "usr/share/applications/pdf-markdown-studio.desktop"
+          desktop_fields = {}
+          for line in desktop_path.read_text(encoding="utf-8").splitlines():
+              if "=" in line:
+                  key, value = line.split("=", 1)
+                  desktop_fields[key] = value
+
+          assert desktop_fields["Name"] == "PDF Markdown Studio"
+          assert desktop_fields["Exec"] == "pdf-markdown-studio %F"
+          assert desktop_fields["Icon"] == "pdf-markdown-studio"
+          assert desktop_fields["StartupWMClass"] == "pdf-markdown-studio"
+          assert desktop_fields["Categories"] == "Office;Viewer;"
+          assert desktop_fields["MimeType"] == (
+              "application/pdf;image/png;image/jpeg;image/bmp;image/gif;"
+              "image/webp;image/tiff;"
+          )
+
+          expected_files = {
+              Path("opt/pdf-markdown-studio/pdf_markdown_studio"),
+              Path("usr/bin/pdf-markdown-studio"),
+              Path("usr/share/applications/pdf-markdown-studio.desktop"),
+              Path("usr/share/icons/hicolor/512x512/apps/pdf-markdown-studio.png"),
+          }
+          packaged_files = {
+              path.relative_to(extract_root)
+              for path in extract_root.rglob("*")
+              if path.is_file() or path.is_symlink()
+          }
+          assert packaged_files == expected_files, (
+              "unexpected package inventory (an Engine runtime must never be embedded): "
+              f"{sorted(map(str, packaged_files ^ expected_files))}"
+          )
+
+          launcher = extract_root / "usr/bin/pdf-markdown-studio"
+          assert launcher.read_text(encoding="utf-8") == (
+              '#!/bin/sh\nexec /opt/pdf-markdown-studio/pdf_markdown_studio "$@"\n'
+          )
+          assert os.access(launcher, os.X_OK)
+          assert os.access(
+              extract_root / "opt/pdf-markdown-studio/pdf_markdown_studio",
+              os.X_OK,
+          )
+          assert (
+              extract_root
+              / "usr/share/icons/hicolor/512x512/apps/pdf-markdown-studio.png"
+          ).stat().st_size > 0
+          PY
+
+          desktop-file-validate \
+            "$extract_root/usr/share/applications/pdf-markdown-studio.desktop"
+          sh -n "$extract_root/usr/bin/pdf-markdown-studio"
+
       - name: Upload Ubuntu .deb artifact
         uses: actions/upload-artifact@v4
         with:
@@ -251,10 +181,8 @@ jobs:
 
   publish_release:
     name: Publish Release
-    if: ${{ always() && inputs.create_release == true && needs.build.result == 'success' && (needs.build_ubuntu.result == 'success' || needs.build_ubuntu.result == 'skipped') }}
-    needs:
-      - build
-      - build_ubuntu
+    if: ${{ always() && inputs.create_release == true && needs.build_linux.result == 'success' }}
+    needs: build_linux
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -338,20 +266,42 @@ jobs:
             echo "RELEASE_NAME=PDF Markdown Studio ${release_tag}" >> "$GITHUB_ENV"
           fi
 
-      - name: Download Windows .exe artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: pdf-markdown-studio-windows-x64-exe
-          path: release-assets/windows
+      - name: Reuse Windows and macOS assets from an existing release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SOURCE_TAG: ${{ inputs.non_linux_assets_release_tag }}
+        run: |
+          set -euo pipefail
+          source_tag="${REQUESTED_SOURCE_TAG}"
+          if [[ -z "${source_tag}" ]]; then
+            source_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
+          fi
+          if [[ -z "${source_tag}" || "${source_tag}" == "null" ]]; then
+            echo "No existing release is available for retained Windows/macOS assets." >&2
+            exit 1
+          fi
+          if [[ "${source_tag}" == "${RELEASE_TAG}" ]]; then
+            echo "The retained-asset source tag must differ from the new release tag (${RELEASE_TAG})." >&2
+            exit 1
+          fi
 
-      - name: Download macOS .dmg artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: pdf-markdown-studio-macos-arm64-dmg-only
-          path: release-assets/macos
+          mkdir -p release-assets/windows release-assets/macos
+          gh release download "${source_tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "pdf-markdown-studio-windows-x64.exe" \
+            --dir release-assets/windows
+          gh release download "${source_tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "pdf-markdown-studio-macos-arm64.dmg" \
+            --dir release-assets/macos
+          {
+            echo "NON_LINUX_ASSET_SOURCE_TAG=${source_tag}"
+            echo "NON_LINUX_WINDOWS_SHA256=$(sha256sum release-assets/windows/pdf-markdown-studio-windows-x64.exe | awk '{print $1}')"
+            echo "NON_LINUX_MACOS_SHA256=$(sha256sum release-assets/macos/pdf-markdown-studio-macos-arm64.dmg | awk '{print $1}')"
+          } >> "$GITHUB_ENV"
 
       - name: Download Ubuntu .deb artifact
-        if: ${{ inputs.include_ubuntu }}
         uses: actions/download-artifact@v4
         with:
           name: pdf-markdown-studio-ubuntu-x64-deb
@@ -361,10 +311,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ls -lah release-assets/windows release-assets/macos
-          if [[ "${{ inputs.include_ubuntu }}" == "true" ]]; then
-            ls -lah release-assets/linux
-          fi
+          ls -lah release-assets/windows release-assets/macos release-assets/linux
 
           TAG="${RELEASE_TAG}"
           REPO="${GITHUB_REPOSITORY}"
@@ -378,35 +325,23 @@ jobs:
           MAC_URL="https://github.com/${REPO}/releases/download/${TAG}/${MAC_FILE}"
           UBU_URL="https://github.com/${REPO}/releases/download/${TAG}/${UBU_FILE}"
           SUM_URL="https://github.com/${REPO}/releases/download/${TAG}/${SUM_FILE}"
-          ubuntu_download_line=""
-          ubuntu_install_section=""
-
           mkdir -p release-upload
           cp "release-assets/windows/${WIN_FILE}" "release-upload/${WIN_FILE}"
           cp "release-assets/macos/${MAC_FILE}" "release-upload/${MAC_FILE}"
+          cp "release-assets/linux/${UBU_FILE}" "release-upload/${UBU_FILE}"
           sha256sum "release-upload/${WIN_FILE}" | sed 's|release-upload/||' > "${SUM_FILE}"
           sha256sum "release-upload/${MAC_FILE}" | sed 's|release-upload/||' >> "${SUM_FILE}"
-          if [[ "${{ inputs.include_ubuntu }}" == "true" ]]; then
-            cp "release-assets/linux/${UBU_FILE}" "release-upload/${UBU_FILE}"
-            sha256sum "release-upload/${UBU_FILE}" | sed 's|release-upload/||' >> "${SUM_FILE}"
-            ubuntu_download_line="- Ubuntu x64 (.deb): [${UBU_FILE}](${UBU_URL})"
-            ubuntu_install_section="$(cat <<UBUNTU_INSTALL_SECTION
-          ## Quick Install (Ubuntu)
-
-          \`\`\`bash
-          curl -L "${UBU_URL}" -o /tmp/${UBU_FILE} && sudo apt install -y /tmp/${UBU_FILE}
-          \`\`\`
-          UBUNTU_INSTALL_SECTION
-            )"
-          fi
+          sha256sum "release-upload/${UBU_FILE}" | sed 's|release-upload/||' >> "${SUM_FILE}"
 
           cat > release-notes.md <<RELEASE_NOTES
           ## Downloads
 
           - Windows x64*: [pdf-markdown-studio-windows-x64](${WIN_URL})
           - macOS arm64: [${MAC_FILE}](${MAC_URL})
-          ${ubuntu_download_line}
+          - Ubuntu x64 (.deb): [${UBU_FILE}](${UBU_URL})
           - Checksums: [${SUM_FILE}](${SUM_URL})
+
+          Windows and macOS binaries are carried forward unchanged from release ${NON_LINUX_ASSET_SOURCE_TAG}; this workflow builds only Linux.
 
           ## Unsigned Build Notice
 
@@ -436,8 +371,39 @@ jobs:
           - In the app, after runtime install/repair, click Unblock unsigned runtime then Recheck.
           - The macOS unblock script removes quarantine attributes recursively (xattr -dr com.apple.quarantine) and restores executable bits for runtime binaries/scripts where needed (chmod +x on relevant files).
           
-          ${ubuntu_install_section}
+          ## Quick Install (Ubuntu)
+
+          \`\`\`bash
+          curl -L "${UBU_URL}" -o /tmp/${UBU_FILE} && sudo apt install -y /tmp/${UBU_FILE}
+          \`\`\`
           RELEASE_NOTES
+
+      - name: Verify retained assets are byte-for-byte preserved
+        shell: bash
+        run: |
+          set -euo pipefail
+          for asset in \
+            pdf-markdown-studio-windows-x64.exe \
+            pdf-markdown-studio-macos-arm64.dmg
+          do
+            case "$asset" in
+              *.exe) source_path="release-assets/windows/$asset" ;;
+              *.dmg) source_path="release-assets/macos/$asset" ;;
+            esac
+            upload_path="release-upload/$asset"
+            cmp --silent "$source_path" "$upload_path" || {
+              echo "Retained asset changed during release assembly: $asset" >&2
+              exit 1
+            }
+            source_sha="$(sha256sum "$source_path" | awk '{print $1}')"
+            upload_sha="$(sha256sum "$upload_path" | awk '{print $1}')"
+            test "$source_sha" = "$upload_sha"
+            case "$asset" in
+              *.exe) test "$upload_sha" = "$NON_LINUX_WINDOWS_SHA256" ;;
+              *.dmg) test "$upload_sha" = "$NON_LINUX_MACOS_SHA256" ;;
+            esac
+            echo "$asset preserved byte-for-byte: $source_sha"
+          done
 
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2

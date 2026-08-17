@@ -10,6 +10,7 @@ egui_commonmark = { version = "0.22.0", default-features = true }
 image = { version = "0.25.8", default-features = true }
 libloading = "0.9.0"
 pdfium-render = { version = "0.8.37", default-features = true }
+pollster = "0.4.0"
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rfd = "0.15.4"
 serde = { version = "1.0.228", features = ["derive"] }

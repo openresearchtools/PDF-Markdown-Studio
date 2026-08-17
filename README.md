@@ -3,6 +3,7 @@
 ![PDF Markdown Studio Demo](Demo.png)
 - Windows x64*: [**PDF Markdown Studio.exe**](https://github.com/openresearchtools/PDF-Markdown-Studio/releases/download/1.0/pdf-markdown-studio-windows-x64.exe)
 - macOS arm64: [**PDF Markdown Studio.dmg**](https://github.com/openresearchtools/PDF-Markdown-Studio/releases/download/1.0/pdf-markdown-studio-macos-arm64.dmg)
+- Linux x64: install the `pdf-markdown-studio` Debian package through APT.
 
 PDF Markdown Studio is a desktop app for converting PDFs and images into clean Markdown.
 
@@ -81,7 +82,18 @@ Default Engine runtime path:
 
 - Windows: `C:\Users\<user>\AppData\Roaming\OpenResearchTools\PDF Markdown Studio\Engine`
 - macOS: `~/Library/Application Support/OpenResearchTools/PDF Markdown Studio/Engine`
-- Linux: `~/.local/share/OpenResearchTools/PDF Markdown Studio/Engine`
+- Linux Vulkan: `/opt/openresearchtools/engine/vulkan` (package `openresearchtools-engine`)
+- Linux CUDA: `/opt/openresearchtools/engine/cuda` (package `openresearchtools-engine-cuda`)
+
+On Linux the app does not download or maintain a private Engine copy. Its Vulkan/CUDA
+selector switches directly between those two system-installed package roots. The
+`pdf-markdown-studio` Debian package depends on both Engine packages so both choices
+are available after a normal APT installation.
+
+Linux keeps the GUI and inference runtime in separate processes. Device enumeration,
+FAST conversion, PDF VLM, and image VLM run through `example-cli` from the selected
+package root. This prevents Vulkan and CUDA libraries with matching names from being
+loaded into the same GUI process and makes backend switching deterministic.
 
 Default app settings/data path:
 
@@ -145,7 +157,9 @@ If your environment blocks unsigned binaries, the recommended path is:
 ## If conversion fails or setup is incomplete
 
 1. Open `Settings`.
-2. Use runtime health/check and download/repair actions.
+2. On Windows/macOS, use the runtime health/check and download/repair actions. On
+   Linux, reinstall the system packages if the selected runtime check fails:
+   `sudo apt install --reinstall openresearchtools-engine openresearchtools-engine-cuda`.
 3. Confirm model and MMProj paths exist.
 4. Check `Jobs and logs` for the exact error.
 

@@ -85,9 +85,10 @@ Section: utils
 Priority: optional
 Architecture: amd64
 Maintainer: OpenResearchTools
-Depends: libc6, libgcc-s1, libstdc++6, libgl1, libx11-6, libxkbcommon0, libwayland-client0, libasound2, libgtk-3-0
+Depends: libc6, libgcc-s1, libstdc++6, libgl1, libx11-6, libxkbcommon0, libwayland-client0, libasound2, libgtk-3-0, openresearchtools-engine, openresearchtools-engine-cuda
 Description: PDF Markdown Studio desktop app
- Side-by-side PDF/Image and Markdown workflow with OpenResearchTools runtime integration.
+ Side-by-side PDF/Image and Markdown workflow using the system-installed
+ OpenResearchTools Vulkan or CUDA Engine runtime.
 """
     write_text(debian_dir / "control", control)
 
