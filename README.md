@@ -1,9 +1,24 @@
 # PDF Markdown Studio
 
 ![PDF Markdown Studio Demo](Demo.png)
-- Windows x64*: [**PDF Markdown Studio.exe**](https://github.com/openresearchtools/PDF-Markdown-Studio/releases/download/1.0/pdf-markdown-studio-windows-x64.exe)
-- macOS arm64: [**PDF Markdown Studio.dmg**](https://github.com/openresearchtools/PDF-Markdown-Studio/releases/download/1.0/pdf-markdown-studio-macos-arm64.dmg)
-- Linux x64: install the `pdf-markdown-studio` Debian package through APT.
+- Windows x64*: [**PDF Markdown Studio.exe**](https://github.com/openresearchtools/PDF-Markdown-Studio/releases/download/1.1.1/pdf-markdown-studio-windows-x64.exe)
+- macOS arm64: [**PDF Markdown Studio.dmg**](https://github.com/openresearchtools/PDF-Markdown-Studio/releases/download/1.1.1/pdf-markdown-studio-macos-arm64.dmg)
+- Linux amd64: install `pdf-markdown-studio` through APT.
+
+## Install on Debian 13+ or Ubuntu 24.04/26.04+
+
+For the first Open Research Tools installation on a system, copy and run this
+one command:
+
+```sh
+wget -qO /tmp/openresearchtools-archive-keyring.deb https://apt.openresearchtools.com/apt/releases/download/repo/openresearchtools-archive-keyring.deb && sudo apt install -y /tmp/openresearchtools-archive-keyring.deb && sudo apt update && sudo apt install -y pdf-markdown-studio
+```
+
+If the Open Research Tools APT repository is already configured:
+
+```sh
+sudo apt install pdf-markdown-studio
+```
 
 PDF Markdown Studio is a desktop app for converting PDFs and images into clean Markdown.
 
