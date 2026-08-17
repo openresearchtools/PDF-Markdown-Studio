@@ -675,6 +675,15 @@ pub fn list_bridge_devices(runtime_dir: &Path) -> Result<Vec<EngineDevice>, Stri
 
 #[cfg(target_os = "linux")]
 fn run_pdf_vlm_cli(runtime_dir: &Path, request: &PdfVlmRequest) -> Result<(), String> {
+    let args = build_pdf_vlm_cli_args(request);
+
+    run_runtime_cli(runtime_dir, &args)
+        .map(|_| ())
+        .map_err(|err| format!("{err} (effective gpu={})", describe_gpu(request.gpu)))
+}
+
+#[cfg(target_os = "linux")]
+fn build_pdf_vlm_cli_args(request: &PdfVlmRequest) -> Vec<String> {
     let selected_gpu = request.gpu.map(|gpu| gpu.max(0));
     let mut args = vec!["pdfvlm".to_owned()];
     args.push(if request.is_image {
@@ -683,8 +692,10 @@ fn run_pdf_vlm_cli(runtime_dir: &Path, request: &PdfVlmRequest) -> Result<(), St
         "--pdf".to_owned()
     });
     args.push(request.input_path.display().to_string());
-    args.push("--pdfium-lib".to_owned());
-    args.push(request.pdfium_lib_path.display().to_string());
+    if !request.is_image {
+        args.push("--pdfium-lib".to_owned());
+        args.push(request.pdfium_lib_path.display().to_string());
+    }
     args.push("--model".to_owned());
     args.push(request.model_path.display().to_string());
     args.push("--mmproj".to_owned());
@@ -742,9 +753,7 @@ fn run_pdf_vlm_cli(runtime_dir: &Path, request: &PdfVlmRequest) -> Result<(), St
     args.push("--split-mode".to_owned());
     args.push("none".to_owned());
 
-    run_runtime_cli(runtime_dir, &args)
-        .map(|_| ())
-        .map_err(|err| format!("{err} (effective gpu={})", describe_gpu(request.gpu)))
+    args
 }
 
 #[cfg(target_os = "linux")]
@@ -1109,6 +1118,59 @@ fn with_runtime_cwd<T>(runtime_dir: &Path, f: impl FnOnce() -> T) -> Result<T, S
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests {
     use super::*;
+
+    fn sample_vlm_request(is_image: bool) -> PdfVlmRequest {
+        PdfVlmRequest {
+            input_path: PathBuf::from(if is_image {
+                "/tmp/example.png"
+            } else {
+                "/tmp/example.pdf"
+            }),
+            is_image,
+            model_path: PathBuf::from("/tmp/model.gguf"),
+            mmproj_path: PathBuf::from("/tmp/mmproj.gguf"),
+            output_md_path: PathBuf::from("/tmp/output.md"),
+            pdfium_lib_path: PathBuf::from("/tmp/libpdfium.so"),
+            prompt: "Convert to markdown".to_owned(),
+            n_predict: 4096,
+            n_ctx: 32768,
+            n_batch: 2048,
+            n_ubatch: 1024,
+            n_parallel: 1,
+            n_threads: 8,
+            n_threads_batch: 8,
+            gpu: Some(0),
+        }
+    }
+
+    #[test]
+    fn image_vlm_cli_args_exclude_pdf_only_pdfium_option() {
+        let args = build_pdf_vlm_cli_args(&sample_vlm_request(true));
+
+        assert_eq!(args.first().map(String::as_str), Some("pdfvlm"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--image", "/tmp/example.png"])
+        );
+        assert!(!args.iter().any(|arg| arg == "--pdf"));
+        assert!(!args.iter().any(|arg| arg == "--pdfium-lib"));
+        assert!(!args.iter().any(|arg| arg == "/tmp/libpdfium.so"));
+    }
+
+    #[test]
+    fn pdf_vlm_cli_args_keep_pdfium_option() {
+        let args = build_pdf_vlm_cli_args(&sample_vlm_request(false));
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--pdf", "/tmp/example.pdf"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--pdfium-lib", "/tmp/libpdfium.so"])
+        );
+        assert!(!args.iter().any(|arg| arg == "--image"));
+    }
 
     #[test]
     fn parses_selected_runtime_cli_device_output() {

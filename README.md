@@ -217,7 +217,7 @@ This project is independent and is **not affiliated with, sponsored by, or endor
 
 Suggested citation:
 
-Rutkauskas, L. (2026). *PDF Markdown Studio* (Version 1.1.0) [Computer software].
+Rutkauskas, L. (2026). *PDF Markdown Studio* (Version 1.1.1) [Computer software].
 OpenResearchTools. <https://github.com/openresearchtools/pdfmarkdownstudio>.
 
 BibTeX:
@@ -226,7 +226,7 @@ BibTeX:
 @software{Rutkauskas_PDFMarkdownStudio_2026,
   author    = {Rutkauskas, L.},
   title     = {PDF Markdown Studio},
-  version   = {1.1.0},
+  version   = {1.1.1},
   date      = {2026-03-04},
   url       = {https://github.com/openresearchtools/pdfmarkdownstudio},
   publisher = {OpenResearchTools},
