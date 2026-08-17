@@ -11,7 +11,7 @@ For the first Open Research Tools installation on a system, copy and run this
 one command:
 
 ```sh
-wget -qO /tmp/openresearchtools-archive-keyring.deb https://apt.openresearchtools.com/apt/releases/download/repo/openresearchtools-archive-keyring.deb && sudo apt install -y /tmp/openresearchtools-archive-keyring.deb && sudo apt update && sudo apt install -y pdf-markdown-studio
+wget -qO /tmp/keyring.deb https://keyring.openresearchtools.com && sudo apt install -y /tmp/keyring.deb && sudo apt update && sudo apt install -y pdf-markdown-studio
 ```
 
 If the Open Research Tools APT repository is already configured:
