@@ -5,6 +5,7 @@ mod engine_bindings;
 mod runtime_manager;
 
 use std::collections::{HashMap, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -277,6 +278,72 @@ enum MarkdownRenderBlock {
         rows: Vec<Vec<String>>,
         alignments: Vec<Align>,
     },
+}
+
+#[derive(Default)]
+struct MarkdownPreviewPlan {
+    document_id: usize,
+    page_index: usize,
+    markdown_hash: u64,
+    markdown_len: usize,
+    width_bucket: u32,
+    font_size_bits: u32,
+    blocks: Vec<MarkdownRenderBlock>,
+    visible_blocks: usize,
+}
+
+impl MarkdownPreviewPlan {
+    fn prepare(
+        &mut self,
+        document_id: usize,
+        page_index: usize,
+        markdown: &str,
+        page_count: usize,
+        render_width: f32,
+        font_size: f32,
+    ) {
+        let markdown_hash = markdown_fingerprint(markdown);
+        let width_bucket = (render_width.max(1.0) / 8.0).round() as u32;
+        let font_size_bits = font_size.to_bits();
+        let unchanged = self.document_id == document_id
+            && self.page_index == page_index
+            && self.markdown_hash == markdown_hash
+            && self.markdown_len == markdown.len()
+            && self.width_bucket == width_bucket
+            && self.font_size_bits == font_size_bits;
+        if unchanged {
+            return;
+        }
+
+        let markdown_pages = split_markdown_by_page_markers(markdown, page_count);
+        let content = markdown_pages
+            .get(page_index)
+            .map_or("", std::string::String::as_str);
+        self.document_id = document_id;
+        self.page_index = page_index;
+        self.markdown_hash = markdown_hash;
+        self.markdown_len = markdown.len();
+        self.width_bucket = width_bucket;
+        self.font_size_bits = font_size_bits;
+        self.blocks = split_markdown_render_blocks(content);
+        self.visible_blocks = 0;
+    }
+
+    fn visible(&self) -> &[MarkdownRenderBlock] {
+        &self.blocks[..self.visible_blocks.min(self.blocks.len())]
+    }
+
+    fn advance(&mut self) -> bool {
+        if self.visible_blocks >= self.blocks.len() {
+            return false;
+        }
+        self.visible_blocks += 1;
+        true
+    }
+
+    fn is_pending(&self) -> bool {
+        self.visible_blocks < self.blocks.len()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -596,6 +663,7 @@ struct PdfMarkdownApp {
     next_doc_id: usize,
     next_texture_id: usize,
     markdown_cache: CommonMarkCache,
+    markdown_preview_plan: MarkdownPreviewPlan,
 
     status_message: String,
     prompt_overrides_window_open: bool,
@@ -745,6 +813,7 @@ impl PdfMarkdownApp {
             next_doc_id: 1,
             next_texture_id: 1,
             markdown_cache: CommonMarkCache::default(),
+            markdown_preview_plan: MarkdownPreviewPlan::default(),
             status_message: startup_status,
             prompt_overrides_window_open: false,
             about_window_open: false,
@@ -3977,6 +4046,7 @@ impl PdfMarkdownApp {
                                     &mut self.pending_markdown_edit_focus_page,
                                     &mut self.last_markdown_toggle_at,
                                     &mut self.markdown_cache,
+                                    &mut self.markdown_preview_plan,
                                     &mut pending_md_sync,
                                     &mut markdown_ui_actions,
                                 );
@@ -5935,6 +6005,11 @@ fn render_source_pane(
                         || input.smooth_scroll_delta.y.abs() > f32::EPSILON
                 });
             let vertical_scroll_offset = scroll_output.state.offset.y.max(0.0);
+            // Images have a single source page, so there is no page rect to seek.
+            // Completing this request is essential: leaving it set forces egui to
+            // repaint continuously and makes the first Markdown layout compete
+            // with an unnecessary full-frame loop.
+            complete_single_page_source_sync(pending_sync_to_pdf);
             PaneMetrics {
                 hovered,
                 user_scrolled,
@@ -5944,6 +6019,10 @@ fn render_source_pane(
             }
         }
     }
+}
+
+fn complete_single_page_source_sync(pending_sync_to_source: &mut Option<usize>) {
+    *pending_sync_to_source = None;
 }
 
 fn render_markdown_pane(
@@ -5957,6 +6036,7 @@ fn render_markdown_pane(
     pending_edit_focus_page: &mut Option<usize>,
     last_toggle_at: &mut f64,
     markdown_cache: &mut CommonMarkCache,
+    markdown_preview_plan: &mut MarkdownPreviewPlan,
     pending_sync_to_markdown: &mut Option<usize>,
     ui_actions: &mut MarkdownPaneUiActions,
 ) -> PaneMetrics {
@@ -6093,8 +6173,17 @@ fn render_markdown_pane(
     }
 
     let page_count = document.page_count();
-    let markdown_pages = split_markdown_by_page_markers(&document.markdown, page_count);
     let display_page = current_page.min(page_count.saturating_sub(1));
+    let page_outer_width = ui.available_width().max(1.0);
+    let render_width = (page_outer_width - 16.0).max(1.0);
+    markdown_preview_plan.prepare(
+        document.id,
+        display_page,
+        &document.markdown,
+        page_count,
+        render_width,
+        markdown_font_size,
+    );
 
     let scroll_area = ScrollArea::vertical()
         .id_salt(("md_view", document.id))
@@ -6106,7 +6195,6 @@ fn render_markdown_pane(
         .scope(|ui| {
             ui.set_style(markdown_style);
             scroll_area.show(ui, |ui| {
-                let page_outer_width = ui.available_width().max(1.0);
                 ui.set_max_width(page_outer_width);
                 let mut page_rects = Vec::with_capacity(1);
 
@@ -6130,12 +6218,8 @@ fn render_markdown_pane(
                         0.0
                     };
 
-                    let content = markdown_pages
-                        .get(page_index)
-                        .map_or("", std::string::String::as_str);
                     // Frame has 8px inner margin on each side, so reserve that space up-front
                     // to keep the outer frame fully inside the pane.
-                    let render_width = (page_outer_width - 16.0).max(1.0);
                     let frame_response = egui::Frame::group(ui.style())
                         .stroke(current_page_stroke)
                         .inner_margin(egui::Margin::symmetric(8, 8))
@@ -6149,7 +6233,7 @@ fn render_markdown_pane(
                             ui.separator();
 
                             ui.push_id(("md_page", document.id, page_index), |ui| {
-                                let render_blocks = split_markdown_render_blocks(content);
+                                let render_blocks = markdown_preview_plan.visible();
                                 let mut render_blocks_ui = |ui: &mut egui::Ui| {
                                     for (block_index, block) in render_blocks.iter().enumerate() {
                                         match block {
@@ -6195,6 +6279,17 @@ fn render_markdown_pane(
                                     }
                                 };
                                 render_blocks_ui(ui);
+                                if markdown_preview_plan.is_pending() {
+                                    ui.add_space(8.0);
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(format!(
+                                            "Rendering Markdown preview ({}/{})...",
+                                            markdown_preview_plan.visible_blocks,
+                                            markdown_preview_plan.blocks.len()
+                                        ));
+                                    });
+                                }
                             });
                         })
                         .response;
@@ -6212,6 +6307,10 @@ fn render_markdown_pane(
             })
         })
         .inner;
+
+    if markdown_preview_plan.advance() {
+        ctx.request_repaint();
+    }
 
     let hovered = ctx
         .pointer_hover_pos()
@@ -6616,6 +6715,47 @@ fn push_markdown_render_text_block(blocks: &mut Vec<MarkdownRenderBlock>, text_b
     text_block.clear();
 }
 
+const MARKDOWN_TEXT_BLOCK_TARGET_BYTES: usize = 1024;
+const MARKDOWN_TABLE_ROWS_PER_BLOCK: usize = 32;
+
+fn markdown_fingerprint(markdown: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    markdown.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn is_markdown_heading(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let marker_count = trimmed.chars().take_while(|ch| *ch == '#').count();
+    (1..=6).contains(&marker_count)
+        && trimmed
+            .chars()
+            .nth(marker_count)
+            .is_some_and(char::is_whitespace)
+}
+
+fn push_markdown_table_blocks(
+    blocks: &mut Vec<MarkdownRenderBlock>,
+    rows: Vec<Vec<String>>,
+    alignments: Vec<Align>,
+) {
+    if rows.len() <= MARKDOWN_TABLE_ROWS_PER_BLOCK {
+        blocks.push(MarkdownRenderBlock::Table { rows, alignments });
+        return;
+    }
+
+    let header = rows[0].clone();
+    for data_rows in rows[1..].chunks(MARKDOWN_TABLE_ROWS_PER_BLOCK - 1) {
+        let mut chunk = Vec::with_capacity(data_rows.len() + 1);
+        chunk.push(header.clone());
+        chunk.extend(data_rows.iter().cloned());
+        blocks.push(MarkdownRenderBlock::Table {
+            rows: chunk,
+            alignments: alignments.clone(),
+        });
+    }
+}
+
 fn split_markdown_render_blocks(markdown: &str) -> Vec<MarkdownRenderBlock> {
     let lines: Vec<&str> = markdown.lines().collect();
     if lines.is_empty() {
@@ -6640,6 +6780,10 @@ fn split_markdown_render_blocks(markdown: &str) -> Vec<MarkdownRenderBlock> {
             continue;
         }
 
+        if !in_code_block && is_markdown_heading(line) {
+            push_markdown_render_text_block(&mut blocks, &mut text_block);
+        }
+
         if !in_code_block && line.contains('|') {
             let start = i;
             while i < lines.len() {
@@ -6653,7 +6797,7 @@ fn split_markdown_render_blocks(markdown: &str) -> Vec<MarkdownRenderBlock> {
             let table_lines = &lines[start..i];
             if let Some((rows, alignments)) = parse_pipe_table_rows(table_lines) {
                 push_markdown_render_text_block(&mut blocks, &mut text_block);
-                blocks.push(MarkdownRenderBlock::Table { rows, alignments });
+                push_markdown_table_blocks(&mut blocks, rows, alignments);
             } else {
                 for (row_index, row) in table_lines.iter().enumerate() {
                     text_block.push_str(row);
@@ -6670,6 +6814,12 @@ fn split_markdown_render_blocks(markdown: &str) -> Vec<MarkdownRenderBlock> {
             text_block.push('\n');
         }
         i += 1;
+        if !in_code_block
+            && ((line.trim().is_empty() && text_block.len() >= MARKDOWN_TEXT_BLOCK_TARGET_BYTES)
+                || text_block.len() >= MARKDOWN_TEXT_BLOCK_TARGET_BYTES * 4)
+        {
+            push_markdown_render_text_block(&mut blocks, &mut text_block);
+        }
     }
 
     push_markdown_render_text_block(&mut blocks, &mut text_block);
@@ -7037,5 +7187,68 @@ mod tests {
 
         assert_eq!(selected, 1);
         assert_eq!(options[selected].devices_value, "0");
+    }
+
+    #[test]
+    fn newly_changed_markdown_preview_is_revealed_progressively() {
+        let markdown = "<--page1-->\n\n# First\n\nText.\n\n## Second\n\nMore text.";
+        let mut plan = MarkdownPreviewPlan::default();
+
+        plan.prepare(7, 0, markdown, 1, 800.0, 15.0);
+        assert!(plan.visible().is_empty());
+        assert!(plan.blocks.len() >= 2);
+        assert!(plan.is_pending());
+
+        let total_blocks = plan.blocks.len();
+        for expected_visible in 1..=total_blocks {
+            assert!(plan.advance());
+            assert_eq!(plan.visible().len(), expected_visible);
+        }
+        assert!(!plan.advance());
+        assert!(!plan.is_pending());
+
+        plan.prepare(7, 0, markdown, 1, 800.0, 15.0);
+        assert_eq!(plan.visible().len(), total_blocks);
+        plan.prepare(7, 0, "# Replacement\n\nNew output.", 1, 800.0, 15.0);
+        assert!(plan.visible().is_empty());
+        assert!(plan.is_pending());
+    }
+
+    #[test]
+    fn large_markdown_tables_are_split_into_bounded_render_blocks() {
+        let mut markdown = String::from("| Name | Value |\n| --- | --- |\n");
+        for index in 0..75 {
+            markdown.push_str(&format!("| Row {index} | {index} |\n"));
+        }
+
+        let blocks = split_markdown_render_blocks(&markdown);
+        let table_blocks = blocks
+            .iter()
+            .filter_map(|block| match block {
+                MarkdownRenderBlock::Table { rows, .. } => Some(rows),
+                MarkdownRenderBlock::Markdown(_) => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(table_blocks.len(), 3);
+        assert!(
+            table_blocks
+                .iter()
+                .all(|rows| rows.len() <= MARKDOWN_TABLE_ROWS_PER_BLOCK)
+        );
+        assert!(
+            table_blocks
+                .iter()
+                .all(|rows| rows.first().is_some_and(|row| row[0] == "Name"))
+        );
+    }
+
+    #[test]
+    fn image_source_completes_single_page_sync_request() {
+        let mut pending_sync = Some(0);
+
+        complete_single_page_source_sync(&mut pending_sync);
+
+        assert_eq!(pending_sync, None);
     }
 }
