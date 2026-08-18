@@ -342,6 +342,33 @@ jobs:
           - Checksums: [${SUM_FILE}](${SUM_URL})
 
           Windows and macOS binaries are carried forward unchanged from release ${NON_LINUX_ASSET_SOURCE_TAG}; this workflow builds only Linux.
+          RELEASE_NOTES
+
+          package_version="$(dpkg-deb --field "release-upload/${UBU_FILE}" Version)"
+          if [[ "${{ inputs.prerelease }}" != "true" && "${{ inputs.draft }}" != "true" ]]; then
+            cat >> release-notes.md <<RELEASE_NOTES
+
+          <!-- openresearchtools-apt-install:start -->
+          ## Install on Debian 13+ or Ubuntu 24.04/26.04+ (amd64)
+
+          For the first Open Research Tools installation on this system:
+
+          \`\`\`bash
+          wget -qO /tmp/keyring.deb https://keyring.openresearchtools.com && sudo apt install -y /tmp/keyring.deb && sudo apt update && sudo apt install -y pdf-markdown-studio=${package_version}
+          \`\`\`
+
+          If the Open Research Tools APT repository is already configured:
+
+          \`\`\`bash
+          sudo apt update && sudo apt install -y pdf-markdown-studio=${package_version}
+          \`\`\`
+
+          APT installs the required Open Research Tools Engine packages automatically.
+          <!-- openresearchtools-apt-install:end -->
+          RELEASE_NOTES
+          fi
+
+          cat >> release-notes.md <<RELEASE_NOTES
 
           ## Unsigned Build Notice
 
@@ -370,12 +397,6 @@ jobs:
           - If blocked by Gatekeeper, use System Settings -> Privacy & Security -> Open Anyway when available and policy permits.
           - In the app, after runtime install/repair, click Unblock unsigned runtime then Recheck.
           - The macOS unblock script removes quarantine attributes recursively (xattr -dr com.apple.quarantine) and restores executable bits for runtime binaries/scripts where needed (chmod +x on relevant files).
-          
-          ## Quick Install (Ubuntu)
-
-          \`\`\`bash
-          curl -L "${UBU_URL}" -o /tmp/${UBU_FILE} && sudo apt install -y /tmp/${UBU_FILE}
-          \`\`\`
           RELEASE_NOTES
 
       - name: Verify retained assets are byte-for-byte preserved
