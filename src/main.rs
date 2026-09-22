@@ -1094,6 +1094,9 @@ impl PdfMarkdownApp {
     }
 
     fn default_runtime_backends_for_platform() -> Vec<String> {
+        if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+            return vec!["vulkan".to_owned()];
+        }
         if cfg!(target_os = "windows") {
             return vec!["vulkan".to_owned(), "cuda".to_owned()];
         }
@@ -1104,6 +1107,9 @@ impl PdfMarkdownApp {
     }
 
     fn runtime_backend_options_from_assets(assets: &[ManifestAsset]) -> Vec<String> {
+        if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+            return vec!["vulkan".to_owned()];
+        }
         let mut options = assets
             .iter()
             .map(|asset| asset.backend.trim().to_ascii_lowercase())
@@ -2446,7 +2452,7 @@ impl PdfMarkdownApp {
     fn start_runtime_download(&mut self) {
         #[cfg(target_os = "linux")]
         {
-            self.runtime_status = "Engine runtimes are managed by APT on Linux. Install or repair both packages with: sudo apt install --reinstall openresearchtools-engine openresearchtools-engine-cuda".to_owned();
+            self.runtime_status = if cfg!(target_arch = "aarch64") { "Repair the Vulkan Engine with: sudo apt install --reinstall openresearchtools-engine" } else { "Engine runtimes are managed by APT on Linux. Install or repair both packages with: sudo apt install --reinstall openresearchtools-engine openresearchtools-engine-cuda" }.to_owned();
             self.status_message = self.runtime_status.clone();
             self.push_log(LogLevel::Info, self.runtime_status.clone());
             return;
@@ -4581,7 +4587,7 @@ impl PdfMarkdownApp {
                 ui.label("Saved next to each source file as <source>FAST.md or <source>VLM.md");
                 #[cfg(target_os = "linux")]
                 ui.label(
-                    RichText::new("Engine is installed system-wide by APT. The backend selector maps directly to /opt/openresearchtools/engine/vulkan or /opt/openresearchtools/engine/cuda; this app does not download or copy Engine on Linux.")
+                    RichText::new(if cfg!(target_arch = "aarch64") { "Linux ARM64 uses Vulkan automatically. APT downloads the ARM64 openresearchtools-engine package (v1.17 or newer)." } else { "Engine is installed system-wide by APT. The backend selector maps directly to /opt/openresearchtools/engine/vulkan or /opt/openresearchtools/engine/cuda; this app does not download or copy Engine on Linux." })
                         .small()
                         .color(Color32::from_rgb(89, 95, 105)),
                 );
@@ -4678,14 +4684,14 @@ impl PdfMarkdownApp {
                             self.ensure_devices_enumerated_for_runtime();
                             self.update_setup_modal_after_requirement_change();
                         }
-                        ui.label("Managed by packages openresearchtools-engine and openresearchtools-engine-cuda.");
+                        ui.label(if cfg!(target_arch = "aarch64") { "Managed by package openresearchtools-engine (Vulkan)." } else { "Managed by packages openresearchtools-engine and openresearchtools-engine-cuda." });
                     }
                 });
                 if !self.runtime_check.is_ok() {
                     #[cfg(target_os = "linux")]
                     ui.colored_label(
                         Color32::from_rgb(167, 37, 37),
-                        "Selected Engine package is incomplete. Install or repair both required packages with APT.",
+                        if cfg!(target_arch = "aarch64") { "Vulkan Engine is incomplete. Repair with: sudo apt install --reinstall openresearchtools-engine" } else { "Selected Engine package is incomplete. Install or repair both required packages with APT." },
                     );
                     #[cfg(not(target_os = "linux"))]
                     ui.colored_label(
@@ -4791,7 +4797,9 @@ impl PdfMarkdownApp {
                     }
                 }
 
-                #[cfg(target_os = "linux")]
+                #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+                ui.label("Linux ARM64 Engine: Vulkan");
+                #[cfg(all(target_os = "linux", not(target_arch = "aarch64")))]
                 {
                     if self.runtime_install_backends.is_empty() {
                         self.runtime_install_backends = Self::default_runtime_backends_for_platform();

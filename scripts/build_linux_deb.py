@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--binary", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--version", default="")
+    parser.add_argument("--architecture", choices=("amd64", "arm64"), default="amd64")
     return parser.parse_args()
 
 
@@ -65,6 +66,12 @@ def main() -> int:
     version = args.version.strip() or read_version(repo_root)
     deb_version = debianize_version(version)
 
+    architecture = args.architecture
+    expected_machine = {"amd64": 62, "arm64": 183}[architecture]
+    header = binary_path.read_bytes()[:20]
+    if header[:5] != b"\x7fELF\x02" or int.from_bytes(header[18:20], "little") != expected_machine:
+        raise RuntimeError(f"binary is not a 64-bit {architecture} ELF")
+    engine_depends = "openresearchtools-engine (>= 1.17)" if architecture == "arm64" else "openresearchtools-engine, openresearchtools-engine-cuda"
     package_name = "pdf-markdown-studio"
     package_dir = output_dir / "deb-stage"
     if package_dir.exists():
@@ -83,12 +90,12 @@ def main() -> int:
 Version: {deb_version}
 Section: utils
 Priority: optional
-Architecture: amd64
+Architecture: {architecture}
 Maintainer: OpenResearchTools
-Depends: libc6, libgcc-s1, libstdc++6, libgl1, libx11-6, libxkbcommon0, libwayland-client0, libasound2, libgtk-3-0, openresearchtools-engine, openresearchtools-engine-cuda
+Depends: libc6, libgcc-s1, libstdc++6, libgl1, libx11-6, libxkbcommon0, libwayland-client0, libasound2, libgtk-3-0, {engine_depends}
 Description: PDF Markdown Studio desktop app
  Side-by-side PDF/Image and Markdown workflow using the system-installed
- OpenResearchTools Vulkan or CUDA Engine runtime.
+ OpenResearchTools Engine runtime.
 """
     write_text(debian_dir / "control", control)
 
@@ -131,7 +138,7 @@ exec /opt/pdf-markdown-studio/pdf_markdown_studio "$@"
         icon_dir / "pdf-markdown-studio.png",
         mode=0o644,
     )
-    deb_path = output_dir / f"{package_name}_{deb_version}_amd64.deb"
+    deb_path = output_dir / f"{package_name}_{deb_version}_{architecture}.deb"
     if deb_path.exists():
         deb_path.unlink()
 

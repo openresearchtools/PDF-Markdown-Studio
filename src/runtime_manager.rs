@@ -80,8 +80,10 @@ pub fn current_platform_key() -> &'static str {
         "windows-x64"
     } else if cfg!(target_os = "macos") {
         "macos-arm64"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "linux-arm64"
     } else {
-        "ubuntu-x64"
+        "linux-x64"
     }
 }
 
@@ -838,4 +840,20 @@ pub fn download_model_to_file(
 
     on_status(format!("Downloading model from {url}"));
     download_file_with_progress(&client, url, destination, |status| on_status(status))
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "aarch64"))]
+mod arm64_tests {
+    #[test]
+    fn bundled_manifest_selects_only_arm64_vulkan() {
+        let manifest: super::EngineManifest = serde_json::from_str(include_str!(
+            "../runtime-manifests/engine-manifest.json"
+        )).unwrap();
+        assert_eq!(super::current_platform_key(), "linux-arm64");
+        let assets = super::filtered_assets_for_platform(&manifest);
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].backend, "vulkan");
+        assert_eq!(assets[0].file_name, "engine-arm64.deb");
+        assert_eq!(assets[0].sha256, "7f2a9e4de287cbed4ac6f25e8c200f69bc58505c0dbba26e6c8b297a889fac27");
+    }
 }

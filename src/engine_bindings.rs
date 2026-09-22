@@ -1199,6 +1199,21 @@ device index=1 backend=CPU name=CPU desc=Intel(R) Core(TM) Ultra 9 275HX type=0 
     }
 
     #[test]
+    fn linux_vulkan_pdf_e2e_when_fixture_environment_is_set() {
+        let Ok(input) = std::env::var("PDF_STUDIO_E2E_INPUT") else { return; };
+        let output = std::env::var("PDF_STUDIO_E2E_OUTPUT").expect("PDF_STUDIO_E2E_OUTPUT");
+        let runtime = Path::new(crate::app_config::LINUX_VULKAN_RUNTIME_DIR);
+        let check = crate::runtime_manager::check_runtime_dir(runtime);
+        assert!(check.is_ok(), "missing runtime: {:?}", check.missing);
+        let devices = list_bridge_devices(runtime).expect("Vulkan enumeration");
+        assert!(devices.iter().any(|device| device.backend.eq_ignore_ascii_case("vulkan")));
+        assert!(!devices.iter().any(|device| device.backend.eq_ignore_ascii_case("cuda")));
+        run_pdf_fast(runtime, Path::new(&input), Path::new(&output)).expect("app PDF conversion");
+        let markdown = std::fs::read_to_string(output).expect("generated Markdown");
+        assert!(markdown.contains("ARM64 engine PDF extraction works."), "{markdown}");
+    }
+
+    #[test]
     fn installed_linux_backends_are_enumerated_in_separate_processes() {
         let vulkan_root = Path::new("/opt/openresearchtools/engine/vulkan");
         let cuda_root = Path::new("/opt/openresearchtools/engine/cuda");

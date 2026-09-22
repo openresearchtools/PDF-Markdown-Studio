@@ -15,7 +15,7 @@ pub const LINUX_CUDA_RUNTIME_DIR: &str = "/opt/openresearchtools/engine/cuda";
 #[cfg(target_os = "linux")]
 pub fn linux_runtime_dir_for_backend(backend: &str) -> PathBuf {
     match backend.trim().to_ascii_lowercase().as_str() {
-        "cuda" => PathBuf::from(LINUX_CUDA_RUNTIME_DIR),
+        "cuda" if !cfg!(target_arch = "aarch64") => PathBuf::from(LINUX_CUDA_RUNTIME_DIR),
         _ => PathBuf::from(LINUX_VULKAN_RUNTIME_DIR),
     }
 }
@@ -32,7 +32,7 @@ mod linux_tests {
         );
         assert_eq!(
             linux_runtime_dir_for_backend(" CUDA "),
-            PathBuf::from("/opt/openresearchtools/engine/cuda")
+            PathBuf::from(if cfg!(target_arch = "aarch64") { LINUX_VULKAN_RUNTIME_DIR } else { LINUX_CUDA_RUNTIME_DIR })
         );
     }
 }
@@ -291,7 +291,8 @@ pub fn load_settings(paths: &AppPaths) -> Result<AppSettings, String> {
             parsed.runtime_download_backend.trim().to_ascii_lowercase();
     }
     #[cfg(target_os = "linux")]
-    if parsed.runtime_download_backend != "cuda" && parsed.runtime_download_backend != "vulkan" {
+    if cfg!(target_arch = "aarch64") || (parsed.runtime_download_backend != "cuda" && parsed.runtime_download_backend != "vulkan") {
+        runtime_path_migrated |= parsed.runtime_download_backend != "vulkan";
         parsed.runtime_download_backend = "vulkan".to_owned();
     }
 
